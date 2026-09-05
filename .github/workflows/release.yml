@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-preview.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: NuGet version, for example 0.1.0-preview.1
+        required: true
+        default: 0.1.0-preview.1
+        type: string
+      publish:
+        description: Publish to NuGet.org after all tests pass
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - id: version
+        name: Validate version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: |
+          version="${REQUESTED_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+            echo "::error::Version '$version' must match N.N.N-preview.N."
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  build-native:
+    needs: prepare
+    name: Build ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+            target: x86_64-pc-windows-msvc
+            zig: false
+          - runner: windows-11-arm
+            rid: win-arm64
+            target: aarch64-pc-windows-msvc
+            zig: false
+          - runner: ubuntu-latest
+            rid: linux-x64
+            target: x86_64-unknown-linux-gnu
+            zig: false
+          - runner: ubuntu-24.04-arm
+            rid: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            zig: false
+          - runner: ubuntu-latest
+            rid: linux-musl-x64
+            target: x86_64-unknown-linux-musl
+            zig: true
+          - runner: ubuntu-24.04-arm
+            rid: linux-musl-arm64
+            target: aarch64-unknown-linux-musl
+            zig: true
+          - runner: macos-15-intel
+            rid: osx-x64
+            target: x86_64-apple-darwin
+            zig: false
+          - runner: macos-latest
+            rid: osx-arm64
+            target: aarch64-apple-darwin
+            zig: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        if: matrix.zig
+      - uses: taiki-e/install-action@v2
+        if: matrix.zig
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.rid }}
+      - name: Build native asset
+        shell: pwsh
+        run: |
+          $arguments = @{ Rid = '${{ matrix.rid }}' }
+          if ('${{ matrix.zig }}' -eq 'true') {
+            $arguments.UseZig = $true
+          }
+          ./build/Build-Native.ps1 @arguments
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: artifacts/native/${{ matrix.rid }}/*
+          if-no-files-found: error
+
+  pack:
+    needs: [prepare, build-native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          path: artifacts/native
+      - name: Pack complete NuGet
+        run: dotnet pack src/MiniExcelRust/MiniExcelRust.csproj -c Release -o artifacts/packages -p:PackageVersion=${{ needs.prepare.outputs.version }}
+      - name: Verify package contents
+        shell: pwsh
+        run: ./build/Verify-Package.ps1 -PackagePath 'artifacts/packages/MiniExcelRust.${{ needs.prepare.outputs.version }}.nupkg'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts/packages/MiniExcelRust.${{ needs.prepare.outputs.version }}.*nupkg
+          if-no-files-found: error
+
+  test-package:
+    needs: [prepare, pack]
+    name: Consume ${{ matrix.rid }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+            musl: false
+          - runner: windows-11-arm
+            rid: win-arm64
+            musl: false
+          - runner: ubuntu-latest
+            rid: linux-x64
+            musl: false
+          - runner: ubuntu-24.04-arm
+            rid: linux-arm64
+            musl: false
+          - runner: ubuntu-latest
+            rid: linux-musl-x64
+            musl: true
+          - runner: ubuntu-24.04-arm
+            rid: linux-musl-arm64
+            musl: true
+          - runner: macos-15-intel
+            rid: osx-x64
+            musl: false
+          - runner: macos-latest
+            rid: osx-arm64
+            musl: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts/packages
+      - name: Consume package
+        if: ${{ !matrix.musl }}
+        shell: pwsh
+        run: |
+          dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }}
+          dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }}
+      - name: Consume package in Alpine
+        if: matrix.musl
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            mcr.microsoft.com/dotnet/sdk:8.0-alpine \
+            sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }} && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }}'
+
+  publish:
+    needs: [prepare, test-package]
+    if: github.event_name == 'push' || inputs.publish == true
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts/packages
+      - name: Require NuGet API key
+        shell: bash
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::Add NUGET_API_KEY to the protected release environment."
+            exit 1
+          fi
+      - name: Publish NuGet package
+        run: dotnet nuget push artifacts/packages/MiniExcelRust.${{ needs.prepare.outputs.version }}.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create '${{ github.ref_name }}' artifacts/packages/* --verify-tag --generate-notes --title 'MiniExcelRust ${{ needs.prepare.outputs.version }}'

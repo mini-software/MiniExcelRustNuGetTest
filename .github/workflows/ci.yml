@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run Rust tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Build managed package
+        run: dotnet build src/MiniExcelRust/MiniExcelRust.csproj -c Release
+
+  native-package-test:
+    name: Test ${{ matrix.rid }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+          - runner: windows-11-arm
+            rid: win-arm64
+          - runner: ubuntu-latest
+            rid: linux-x64
+          - runner: ubuntu-24.04-arm
+            rid: linux-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+          - runner: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rid }}
+      - name: Build, pack, and test
+        shell: pwsh
+        run: ./build/Test-Package.ps1 -Rid '${{ matrix.rid }}'
+
+  musl-package-test:
+    name: Test ${{ matrix.rid }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            rid: linux-musl-x64
+          - runner: ubuntu-24.04-arm
+            rid: linux-musl-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: ${{ matrix.rid == 'linux-musl-x64' && 'x86_64-unknown-linux-musl' || 'aarch64-unknown-linux-musl' }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rid }}
+      - name: Build native asset
+        shell: pwsh
+        run: ./build/Build-Native.ps1 -Rid '${{ matrix.rid }}' -UseZig
+      - name: Pack
+        run: dotnet pack src/MiniExcelRust/MiniExcelRust.csproj -c Release -o artifacts/packages -p:MiniExcelRustRequireAllNativeAssets=false
+      - name: Test package in Alpine
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            mcr.microsoft.com/dotnet/sdk:8.0-alpine \
+            sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore'
