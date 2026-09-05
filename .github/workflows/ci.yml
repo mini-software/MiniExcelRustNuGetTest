@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -60,6 +62,11 @@ jobs:
       - name: Build, pack, and test
         shell: pwsh
         run: ./build/Test-Package.ps1 -Rid '${{ matrix.rid }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: artifacts/native/${{ matrix.rid }}/*
+          if-no-files-found: error
 
   musl-package-test:
     name: Test ${{ matrix.rid }} package
@@ -100,3 +107,32 @@ jobs:
             -w /work \
             mcr.microsoft.com/dotnet/sdk:8.0-alpine \
             sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: artifacts/native/${{ matrix.rid }}/*
+          if-no-files-found: error
+
+  assemble-package:
+    name: Assemble eight-RID NuGet
+    needs: [validate, native-package-test, musl-package-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          path: artifacts/native
+      - name: Pack complete NuGet
+        run: dotnet pack src/MiniExcelRust/MiniExcelRust.csproj -c Release -o artifacts/packages
+      - name: Verify package contents
+        shell: pwsh
+        run: ./build/Verify-Package.ps1 -PackagePath artifacts/packages/MiniExcelRust.0.1.0-preview.1.nupkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-preview
+          path: artifacts/packages/MiniExcelRust.0.1.0-preview.1.*nupkg
+          if-no-files-found: error
