@@ -89,7 +89,7 @@ jobs:
           key: ${{ matrix.rid }}
       - name: Build native asset
         shell: pwsh
-        run: ./build/Build-Native.ps1 -Rid '${{ matrix.rid }}' -UseZig
+        run: ./build/Build-Native.ps1 -Rid '${{ matrix.rid }}' -UseZig -Toolchain 1.97.1
       - name: Pack
         run: dotnet pack src/MiniExcelRust/MiniExcelRust.csproj -c Release -o artifacts/packages -p:MiniExcelRustRequireAllNativeAssets=false
       - name: Test package in Alpine

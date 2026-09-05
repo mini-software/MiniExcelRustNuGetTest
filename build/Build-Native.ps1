@@ -13,7 +13,9 @@ param(
     )]
     [string] $Rid,
 
-    [switch] $UseZig
+    [switch] $UseZig,
+
+    [string] $Toolchain
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,16 +35,31 @@ $targets = @{
 $target = $targets[$Rid]
 Push-Location $repositoryRoot
 try {
-    & rustup target add $target.Triple
+    if (-not [string]::IsNullOrWhiteSpace($Toolchain)) {
+        & rustup target add --toolchain $Toolchain $target.Triple
+    }
+    else {
+        & rustup target add $target.Triple
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install Rust target $($target.Triple)."
     }
 
-    if ($UseZig) {
-        & cargo zigbuild --release --locked -p miniexcel-ffi --target $target.Triple
+    $buildArguments = @(
+        $(if ($UseZig) { 'zigbuild' } else { 'build' }),
+        '--release',
+        '--locked',
+        '-p',
+        'miniexcel-ffi',
+        '--target',
+        $target.Triple
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Toolchain)) {
+        & rustup run $Toolchain cargo @buildArguments
     }
     else {
-        & cargo build --release --locked -p miniexcel-ffi --target $target.Triple
+        & cargo @buildArguments
     }
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to build native library for $Rid."

@@ -105,7 +105,10 @@ jobs:
       - name: Build native asset
         shell: pwsh
         run: |
-          $arguments = @{ Rid = '${{ matrix.rid }}' }
+          $arguments = @{
+            Rid = '${{ matrix.rid }}'
+            Toolchain = '${{ matrix.rust }}'
+          }
           if ('${{ matrix.zig }}' -eq 'true') {
             $arguments.UseZig = $true
           }
