@@ -47,6 +47,10 @@ library under `runtimes/{rid}/native/`. .NET selects the matching asset at publi
 
 Rust 1.85 and .NET SDK 8 or later are required.
 
+Rust 1.85 is the source and release MSRV. The musl targets default to a static C runtime,
+which cannot produce a `cdylib`, so their build disables `crt-static` and links dynamically
+against musl before testing the package in Alpine.
+
 ```powershell
 cargo test --workspace --all-targets --locked
 dotnet build ./src/MiniExcelRust/MiniExcelRust.csproj -c Release

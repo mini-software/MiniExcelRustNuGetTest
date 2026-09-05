@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <MiniExcelRustPackageVersion Condition="'$(MiniExcelRustPackageVersion)' == ''">0.1.0-preview.1</MiniExcelRustPackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MiniExcelRust" Version="$(MiniExcelRustPackageVersion)" />
+  </ItemGroup>
+
+</Project>
