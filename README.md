@@ -101,15 +101,26 @@ same generated XLSX file and query options. The scheduled and manually dispatche
 workflow runs on Windows, Linux, and macOS for x64 and Arm64; musl remains covered by the
 Alpine correctness and lifecycle job because GitHub does not provide native musl runners.
 
-The latest checked-in cross-platform summary and per-RID reports are in the
-[benchmark results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md).
-Each report includes elapsed time, first-row latency, managed allocation, peak process memory,
-environment metadata, and a JSON file containing all raw iterations and hashes.
+### Latest Results
 
-After all scheduled benchmarks pass on the default branch, the workflow updates
-`docs/benchmarks/` through an `automation/benchmark-results` pull request. Repeated runs refresh
-the same PR instead of committing directly to the protected branch. Repository settings must
-allow GitHub Actions to create pull requests.
+<!-- benchmark-summary:start -->
+_Last updated (UTC): 2026-09-05 14:05:30_
+
+| RID | Scenario | MiniExcel (ms) | MiniExcelRust (ms) | Speedup | Allocation reduction | Working-set reduction |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| win-x64 | Cold | 2891.79 | 1041.49 | 2.78x | 92.5% | 20.3% |
+| win-x64 | Warm | 6136.27 | 2770.39 | 2.21x | 93.5% | 19.3% |
+
+[Full reports and raw results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md)
+<!-- benchmark-summary:end -->
+
+Each full report includes elapsed time, first-row latency, managed allocation, peak process
+memory, environment metadata, and a JSON file containing all raw iterations and hashes.
+
+After all scheduled benchmarks pass on the default branch, the workflow updates this summary
+and `docs/benchmarks/` through an `automation/benchmark-results` pull request. Repeated runs
+refresh the same PR instead of committing directly to the protected branch. Repository settings
+must allow GitHub Actions to create pull requests.
 
 Run the same reproducible comparison locally, or override `-MiniExcelVersion` to test a newer
 NuGet release:
