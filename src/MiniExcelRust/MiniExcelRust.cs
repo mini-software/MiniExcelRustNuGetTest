@@ -217,6 +217,55 @@ public static class MiniExcelRust
     }
 
     /// <summary>
+    /// Returns threaded comments, replies, and legacy notes from an XLSX worksheet.
+    /// </summary>
+    public static MiniExcelRustCommentResult RetrieveComments(string path, string? sheetName = null)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+
+        EnsureAbiVersion();
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var result = NativeMethods.GetComments(
+            nativePath.Pointer,
+            nativeSheetName.Pointer,
+            out var rawHandle,
+            out var data,
+            out var length);
+        if (result < 0)
+            throw CreateNativeException(result);
+
+        using var handle = new NativeBufferHandle(rawHandle);
+        var byteLength = checked((int)length.ToUInt64());
+        var frame = new byte[byteLength];
+        Marshal.Copy(data, frame, 0, byteLength);
+        return DecodeComments(frame);
+    }
+
+    /// <summary>
+    /// Returns threaded comments, replies, and legacy notes from an XLSX stream.
+    /// </summary>
+    public static MiniExcelRustCommentResult RetrieveComments(
+        Stream stream,
+        string? sheetName = null,
+        bool leaveOpen = false)
+    {
+        return UseStagedStream(stream, leaveOpen, path => RetrieveComments(path, sheetName));
+    }
+
+    /// <summary>
+    /// Asynchronously returns comments and notes from an XLSX worksheet.
+    /// </summary>
+    public static Task<MiniExcelRustCommentResult> RetrieveCommentsAsync(
+        string path,
+        string? sheetName = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => RetrieveComments(path, sheetName), cancellationToken);
+    }
+
+    /// <summary>
     /// Materializes an XLSX query as a DataTable.
     /// </summary>
     public static DataTable QueryAsDataTable(
@@ -539,6 +588,101 @@ public static class MiniExcelRust
         return QueryCsvAsDataTable(stream, hasHeaderRow, configuration, leaveOpen).CreateDataReader();
     }
 
+    /// <summary>
+    /// Creates a single-sheet XLSX workbook from dynamic rows.
+    /// </summary>
+    public static int SaveAs(
+        string path,
+        IEnumerable<IDictionary<string, object?>> rows,
+        bool printHeader = true,
+        string sheetName = "Sheet1",
+        bool overwriteFile = false)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (string.IsNullOrWhiteSpace(sheetName))
+            throw new ArgumentException("The sheet name is required.", nameof(sheetName));
+
+        EnsureAbiVersion();
+        var frame = EncodeRows(rows);
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.SaveAs(
+                nativePath.Pointer,
+                frameHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)frame.Length,
+                printHeader ? (byte)1 : (byte)0,
+                nativeSheetName.Pointer,
+                overwriteFile ? (byte)1 : (byte)0,
+                out var rowCount);
+            if (result < 0)
+                throw CreateNativeException(result);
+            return checked((int)rowCount);
+        }
+        finally
+        {
+            frameHandle.Free();
+        }
+    }
+
+    /// <summary>
+    /// Creates a single-sheet XLSX workbook and copies it to a writable stream.
+    /// </summary>
+    public static int SaveAs(
+        Stream stream,
+        IEnumerable<IDictionary<string, object?>> rows,
+        bool printHeader = true,
+        string sheetName = "Sheet1",
+        bool leaveOpen = false)
+    {
+        if (stream is null)
+            throw new ArgumentNullException(nameof(stream));
+        if (!stream.CanWrite)
+            throw new ArgumentException("The stream must be writable.", nameof(stream));
+
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
+        try
+        {
+            var rowCount = SaveAs(temporaryPath, rows, printHeader, sheetName);
+            using var input = File.OpenRead(temporaryPath);
+            input.CopyTo(stream);
+            return rowCount;
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
+    /// <summary>
+    /// Creates a CSV file from dynamic rows.
+    /// </summary>
+    public static int SaveAsCsv(
+        string path,
+        IEnumerable<IDictionary<string, object?>> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null)
+    {
+        return WriteCsv(path, rows, configuration, append: false);
+    }
+
+    /// <summary>
+    /// Appends dynamic rows to a CSV file without repeating its header.
+    /// </summary>
+    public static int AppendCsv(
+        string path,
+        IEnumerable<IDictionary<string, object?>> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null)
+    {
+        return WriteCsv(path, rows, configuration, append: true);
+    }
+
     private static IEnumerable<IDictionary<string, object?>> QueryStreamIterator(
         Stream stream,
         bool useHeaderRow,
@@ -792,6 +936,74 @@ public static class MiniExcelRust
         return sheets;
     }
 
+    private static MiniExcelRustCommentResult DecodeComments(byte[] frame)
+    {
+        var reader = new FrameReader(frame);
+        var sheetName = reader.ReadString();
+        var commentCount = reader.ReadLength();
+        var comments = new List<MiniExcelRustThreadedComment>(commentCount);
+        for (var index = 0; index < commentCount; index++)
+        {
+            var id = Guid.Parse(reader.ReadString());
+            var referenceCell = reader.ReadString();
+            var author = ReadCommentAuthor(reader);
+            var createdAt = ReadCommentTimestamp(reader);
+            var resolved = reader.ReadByte() != 0;
+            var text = reader.ReadString();
+            var replyCount = reader.ReadLength();
+            var replies = new List<MiniExcelRustThreadedCommentReply>(replyCount);
+            for (var replyIndex = 0; replyIndex < replyCount; replyIndex++)
+            {
+                replies.Add(new MiniExcelRustThreadedCommentReply(
+                    Guid.Parse(reader.ReadString()),
+                    Guid.Parse(reader.ReadString()),
+                    ReadCommentAuthor(reader),
+                    ReadCommentTimestamp(reader),
+                    reader.ReadString()));
+            }
+            comments.Add(new MiniExcelRustThreadedComment(
+                id,
+                referenceCell,
+                author,
+                createdAt,
+                resolved,
+                text,
+                replies));
+        }
+
+        var noteCount = reader.ReadLength();
+        var notes = new List<MiniExcelRustNoteComment>(noteCount);
+        for (var index = 0; index < noteCount; index++)
+        {
+            var id = reader.ReadOptionalString();
+            notes.Add(new MiniExcelRustNoteComment(
+                id is null ? null : Guid.Parse(id),
+                reader.ReadString(),
+                reader.ReadOptionalString() ?? string.Empty,
+                reader.ReadString()));
+        }
+        reader.EnsureComplete();
+        return new MiniExcelRustCommentResult(sheetName, comments, notes);
+    }
+
+    private static MiniExcelRustCommentAuthor? ReadCommentAuthor(FrameReader reader)
+    {
+        if (reader.ReadByte() == 0)
+            return null;
+        return new MiniExcelRustCommentAuthor(
+            Guid.Parse(reader.ReadString()),
+            reader.ReadString(),
+            reader.ReadOptionalString());
+    }
+
+    private static DateTime? ReadCommentTimestamp(FrameReader reader)
+    {
+        var value = reader.ReadOptionalString();
+        return value is null
+            ? null
+            : DateTime.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+    }
+
     private static DataTable CreateDataTable(
         IReadOnlyList<string> columns,
         IEnumerable<IDictionary<string, object?>> rows)
@@ -809,6 +1021,115 @@ public static class MiniExcelRust
         }
 
         return table;
+    }
+
+    private static byte[] EncodeRows(IEnumerable<IDictionary<string, object?>> rows)
+    {
+        var materializedRows = rows.ToList();
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(checked((uint)materializedRows.Count));
+        foreach (var row in materializedRows)
+        {
+            writer.Write(checked((uint)row.Count));
+            foreach (var cell in row)
+            {
+                WriteFrameString(writer, cell.Key);
+                WriteFrameValue(writer, cell.Value);
+            }
+        }
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static int WriteCsv(
+        string path,
+        IEnumerable<IDictionary<string, object?>> rows,
+        MiniExcelRustCsvWriteOptions? configuration,
+        bool append)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        configuration ??= new MiniExcelRustCsvWriteOptions();
+        if (configuration.Delimiter == '\0' || configuration.Delimiter > 0x7f)
+            throw new ArgumentException("The CSV delimiter must be a single-byte ASCII character.", nameof(configuration));
+
+        EnsureAbiVersion();
+        var frame = EncodeRows(rows);
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            var result = append
+                ? NativeMethods.AppendCsv(
+                    nativePath.Pointer,
+                    frameHandle.AddrOfPinnedObject(),
+                    (UIntPtr)(uint)frame.Length,
+                    (byte)configuration.Delimiter,
+                    (byte)configuration.Encoding,
+                    configuration.WriteBom ? (byte)1 : (byte)0,
+                    configuration.PrintHeader ? (byte)1 : (byte)0,
+                    out var rowCount)
+                : NativeMethods.SaveCsv(
+                    nativePath.Pointer,
+                    frameHandle.AddrOfPinnedObject(),
+                    (UIntPtr)(uint)frame.Length,
+                    (byte)configuration.Delimiter,
+                    (byte)configuration.Encoding,
+                    configuration.WriteBom ? (byte)1 : (byte)0,
+                    configuration.PrintHeader ? (byte)1 : (byte)0,
+                    configuration.OverwriteFile ? (byte)1 : (byte)0,
+                    out rowCount);
+            if (result < 0)
+                throw CreateNativeException(result);
+            return checked((int)rowCount);
+        }
+        finally
+        {
+            frameHandle.Free();
+        }
+    }
+
+    private static void WriteFrameString(BinaryWriter writer, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        writer.Write(checked((uint)bytes.Length));
+        writer.Write(bytes);
+    }
+
+    private static void WriteFrameValue(BinaryWriter writer, object? value)
+    {
+        switch (value)
+        {
+            case null:
+            case DBNull:
+                writer.Write((byte)0);
+                break;
+            case bool boolean:
+                writer.Write((byte)1);
+                writer.Write((byte)(boolean ? 1 : 0));
+                break;
+            case byte or sbyte or short or ushort or int or uint or long:
+                writer.Write((byte)2);
+                writer.Write(Convert.ToInt64(value, CultureInfo.InvariantCulture));
+                break;
+            case ulong unsigned when unsigned <= long.MaxValue:
+                writer.Write((byte)2);
+                writer.Write((long)unsigned);
+                break;
+            case float or double or decimal:
+                writer.Write((byte)3);
+                writer.Write(Convert.ToDouble(value, CultureInfo.InvariantCulture));
+                break;
+            case string text:
+                writer.Write((byte)4);
+                WriteFrameString(writer, text);
+                break;
+            default:
+                throw new NotSupportedException($"Values of type {value.GetType().FullName} are not supported by SaveAs yet.");
+        }
     }
 
     private static TResult UseStagedStream<TResult>(
@@ -905,6 +1226,11 @@ public static class MiniExcelRust
             var value = Encoding.UTF8.GetString(frame, _offset, length);
             _offset += length;
             return value;
+        }
+
+        public string? ReadOptionalString()
+        {
+            return ReadByte() == 0 ? null : ReadString();
         }
 
         public object? ReadValue()
@@ -1137,6 +1463,47 @@ public static class MiniExcelRust
             out IntPtr handle,
             out IntPtr data,
             out UIntPtr length);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_get_comments", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int GetComments(
+            IntPtr path,
+            IntPtr sheetName,
+            out IntPtr handle,
+            out IntPtr data,
+            out UIntPtr length);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_save_as", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SaveAs(
+            IntPtr path,
+            IntPtr data,
+            UIntPtr dataLength,
+            byte printHeader,
+            IntPtr sheetName,
+            byte overwriteFile,
+            out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_save_csv", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SaveCsv(
+            IntPtr path,
+            IntPtr data,
+            UIntPtr dataLength,
+            byte delimiter,
+            byte encoding,
+            byte writeBom,
+            byte printHeader,
+            byte overwriteFile,
+            out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_append_csv", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int AppendCsv(
+            IntPtr path,
+            IntPtr data,
+            UIntPtr dataLength,
+            byte delimiter,
+            byte encoding,
+            byte writeBom,
+            byte printHeader,
+            out uint rowCount);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_buffer_close", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void BufferClose(IntPtr handle);

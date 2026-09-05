@@ -59,14 +59,26 @@ Additional read APIs include:
 ```csharp
 var names = MiniExcelRust.GetSheetNames("input.xlsx");
 var dimensions = MiniExcelRust.GetSheetDimensions("input.xlsx");
+var comments = MiniExcelRust.RetrieveComments("input.xlsx", "Data");
 var tableRows = MiniExcelRust.QueryTable("input.xlsx", "Data", "Table1");
 var rangeRows = MiniExcelRust.QueryRange("input.xlsx", true, "Data", "C2", "F100");
 var dataTable = MiniExcelRust.QueryAsDataTable("input.xlsx", hasHeaderRow: true);
+
+var written = MiniExcelRust.SaveAs(
+    "output.xlsx",
+    new[]
+    {
+        new Dictionary<string, object?> { ["Name"] = "alpha", ["Value"] = 42d }
+    });
 
 var csvRows = MiniExcelRust.QueryCsv(
     "input.csv",
     useHeaderRow: true,
     new MiniExcelRustCsvReadOptions { Delimiter = ';' });
+
+MiniExcelRust.SaveAsCsv(
+    "output.csv",
+    new[] { new Dictionary<string, object?> { ["Name"] = "alpha" } });
 ```
 
 Stream overloads stage input to a temporary file so the Rust engine can retain its bounded-memory
@@ -109,6 +121,13 @@ Use the local MiniExcel checkout as the read-only behavior oracle instead of the
 
 ```powershell
 ./build/Test-Package.ps1 -Rid win-x64 -MiniExcelSourceRoot D:\git\MiniExcel
+```
+
+The comments contract can also be checked against the shared Rust fixture after packing:
+
+```powershell
+dotnet run --project .\tests\MiniExcelRust.PackageTests -c Release -- comments `
+    D:\git\MiniExcel-Rust\tests\data\xlsx\TestCommentsAndNotes.xlsx sheet1
 ```
 
 `Test-Package.ps1` builds the native library, packs `MiniExcelRust`, restores a separate

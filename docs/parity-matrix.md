@@ -32,12 +32,13 @@ limits; **Missing** has no production implementation yet.
 | Async | Metadata tasks | Partial | Runs Rust operation on a worker; no in-flight native cancellation |
 | Async | `IAsyncEnumerable<T>` query | Missing | Requires cancellable native iterator and netstandard async interfaces |
 | Typed read | POCO/attribute mapping | Missing | Requires schema/mapping plan and conversion parity |
-| Comments | Notes/threaded comments | Missing | Rust core exists; ABI and managed models required |
+| Comments | Notes/threaded comments | Verified | Path/stream, authors, timestamps, replies, resolved state and legacy notes |
 | CSV read | Dynamic query, path/stream | Verified | Header, delimiter, BOM, Unicode, quoted text and empty string |
 | CSV metadata | Column names | Verified | Path, stream, sync and task-based async |
 | CSV adapters | DataTable/Reader | Verified | Materialized managed adapters |
-| CSV write | Export/append | Missing | Rust core exists; writer ABI required |
-| XLSX write | Export/multi-sheet | Missing | Rust core exists; input schema/callback ABI required |
+| CSV write | Dynamic save/append, path | Partial | Delimiter, BOM, header, overwrite and append verified; stream, typed and async remain |
+| XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Basic scalars and overwrite behavior verified; temporal values, schema, styles and multi-sheet remain |
+| XLSX write | Typed/async/multi-sheet export | Missing | Rust core exists; input schema/callback ABI required |
 | Workbook edits | Insert/copy/alter | Missing | Rust core is partial; package-preservation tests required |
 | Templates | Fill/merge | Missing | Rust core is partial; formula and relationship parity required |
 | Pictures | AddPicture | Missing | Rust core implementation required |

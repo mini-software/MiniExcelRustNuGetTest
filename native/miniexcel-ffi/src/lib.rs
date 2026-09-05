@@ -5,8 +5,9 @@ use std::ptr;
 use std::str::FromStr;
 
 use miniexcel::{
-    CellReference, CellValue, CsvConfiguration, CsvEncoding, CsvReadOptions, DynamicRow,
-    HeaderMode, MiniExcel, ReadOptions, SheetType, SheetVisibility,
+    CellReference, CellValue, CommentPerson, CommentTimestamp, CsvConfiguration, CsvEncoding,
+    CsvReadOptions, CsvWriteOptions, DynamicRow, HeaderMode, MiniExcel, ReadOptions, SheetType,
+    SheetVisibility, WriteOptions,
 };
 
 const ABI_VERSION: u32 = 1;
@@ -15,6 +16,7 @@ const RESULT_BATCH: i32 = 1;
 const ERROR_INVALID_ARGUMENT: i32 = -1;
 const ERROR_QUERY: i32 = -2;
 const ERROR_PANIC: i32 = -3;
+const ERROR_WRITE: i32 = -4;
 
 thread_local! {
     static LAST_ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -41,6 +43,17 @@ struct QueryOpenOptions {
     enable_shared_string_cache: u8,
     shared_string_cache_size: u64,
     shared_string_cache_path: *const c_char,
+}
+
+struct CsvWriteArguments {
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    delimiter: u8,
+    encoding: u8,
+    write_bom: u8,
+    print_header: u8,
+    overwrite_file: u8,
 }
 
 #[unsafe(no_mangle)]
@@ -605,6 +618,197 @@ pub unsafe extern "C" fn miniexcel_get_sheet_info(
     })
 }
 
+/// Returns threaded comments, replies, and legacy notes for a worksheet.
+///
+/// # Safety
+///
+/// `path` and all output pointers must be non-null and valid for the duration of the call.
+/// `sheet_name` may be null. Returned data remains valid until the buffer handle is closed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_get_comments(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || out_handle.is_null() || out_data.is_null() || out_length.is_null() {
+            set_last_error("path, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+
+        let path = unsafe { read_utf8(path) }?;
+        let sheet_name = if sheet_name.is_null() {
+            None
+        } else {
+            let value = unsafe { read_utf8(sheet_name) }?;
+            (!value.is_empty()).then_some(value)
+        };
+        let comments = MiniExcel::get_comments(path, sheet_name).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let mut frame = Vec::new();
+        write_string(&mut frame, comments.sheet_name())?;
+        write_length(&mut frame, comments.threaded_comments().len())?;
+        for comment in comments.threaded_comments() {
+            write_string(&mut frame, comment.id().to_string())?;
+            write_string(&mut frame, comment.cell().to_string())?;
+            write_person(&mut frame, comment.person())?;
+            write_timestamp(&mut frame, comment.created_at())?;
+            frame.push(u8::from(comment.resolved()));
+            write_string(&mut frame, comment.text())?;
+            write_length(&mut frame, comment.replies().len())?;
+            for reply in comment.replies() {
+                write_string(&mut frame, reply.id().to_string())?;
+                write_string(&mut frame, reply.parent_id().to_string())?;
+                write_person(&mut frame, reply.person())?;
+                write_timestamp(&mut frame, reply.created_at())?;
+                write_string(&mut frame, reply.text())?;
+            }
+        }
+        write_length(&mut frame, comments.notes().len())?;
+        for note in comments.notes() {
+            write_optional_string(&mut frame, note.id().map(|id| id.to_string()).as_deref())?;
+            write_string(&mut frame, note.cell().to_string())?;
+            write_optional_string(&mut frame, note.author())?;
+            write_string(&mut frame, note.text())?;
+        }
+
+        let handle = Box::new(BufferHandle { frame });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Creates a single-sheet XLSX workbook from encoded dynamic rows.
+///
+/// # Safety
+///
+/// `path`, `data`, and `out_row_count` must be non-null and valid for the supplied lengths.
+/// `sheet_name` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_save_as(
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    print_header: u8,
+    sheet_name: *const c_char,
+    overwrite_file: u8,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || data.is_null() || out_row_count.is_null() {
+            set_last_error("path, data, and out_row_count are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe { ptr::write(out_row_count, 0) };
+        let path = unsafe { read_utf8(path) }?;
+        let bytes = unsafe { std::slice::from_raw_parts(data, data_length) };
+        let rows = decode_rows(bytes)?;
+        let mut options = WriteOptions::new()
+            .with_print_header(print_header != 0)
+            .with_overwrite_file(overwrite_file != 0);
+        if !sheet_name.is_null() {
+            let sheet_name = unsafe { read_utf8(sheet_name) }?;
+            if !sheet_name.is_empty() {
+                options = options.with_sheet_name(sheet_name);
+            }
+        }
+        MiniExcel::save_as_with_options(path, &rows, &options).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        let row_count = u32::try_from(rows.len()).map_err(|_| {
+            set_last_error("row count exceeds the ABI limit");
+            ERROR_WRITE
+        })?;
+        unsafe { ptr::write(out_row_count, row_count) };
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Creates a CSV file from encoded dynamic rows.
+///
+/// # Safety
+///
+/// `path`, `data`, and `out_row_count` must be non-null and valid for the supplied lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_save_csv(
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    delimiter: u8,
+    encoding: u8,
+    write_bom: u8,
+    print_header: u8,
+    overwrite_file: u8,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| unsafe {
+        write_csv(
+            CsvWriteArguments {
+                path,
+                data,
+                data_length,
+                delimiter,
+                encoding,
+                write_bom,
+                print_header,
+                overwrite_file,
+            },
+            false,
+            out_row_count,
+        )
+    })
+}
+
+/// Appends encoded dynamic rows to a CSV file.
+///
+/// # Safety
+///
+/// `path`, `data`, and `out_row_count` must be non-null and valid for the supplied lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_append_csv(
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    delimiter: u8,
+    encoding: u8,
+    write_bom: u8,
+    print_header: u8,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| unsafe {
+        write_csv(
+            CsvWriteArguments {
+                path,
+                data,
+                data_length,
+                delimiter,
+                encoding,
+                write_bom,
+                print_header,
+                overwrite_file: 0,
+            },
+            true,
+            out_row_count,
+        )
+    })
+}
+
 /// Releases a buffer returned by a metadata operation.
 ///
 /// # Safety
@@ -801,6 +1005,32 @@ fn write_strings(values: Vec<String>) -> Result<Vec<u8>, i32> {
     Ok(frame)
 }
 
+fn write_optional_string(frame: &mut Vec<u8>, value: Option<&str>) -> Result<(), i32> {
+    frame.push(u8::from(value.is_some()));
+    if let Some(value) = value {
+        write_string(frame, value)?;
+    }
+    Ok(())
+}
+
+fn write_person(frame: &mut Vec<u8>, person: Option<&CommentPerson>) -> Result<(), i32> {
+    frame.push(u8::from(person.is_some()));
+    if let Some(person) = person {
+        write_string(frame, person.id().to_string())?;
+        write_string(frame, person.display_name())?;
+        write_optional_string(frame, person.provider_id())?;
+    }
+    Ok(())
+}
+
+fn write_timestamp(frame: &mut Vec<u8>, timestamp: Option<&CommentTimestamp>) -> Result<(), i32> {
+    let value = timestamp.map(|value| match value {
+        CommentTimestamp::Local(value) => value.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+        CommentTimestamp::Offset(value) => value.to_rfc3339(),
+    });
+    write_optional_string(frame, value.as_deref())
+}
+
 fn csv_read_options(
     use_header_row: u8,
     delimiter: u8,
@@ -812,17 +1042,7 @@ fn csv_read_options(
         set_last_error("delimiter must be a single-byte character");
         return Err(ERROR_INVALID_ARGUMENT);
     }
-    let encoding = match encoding {
-        0 => CsvEncoding::Utf8,
-        1 => CsvEncoding::Utf16Le,
-        2 => CsvEncoding::Utf16Be,
-        3 => CsvEncoding::Gbk,
-        4 => CsvEncoding::Windows1252,
-        _ => {
-            set_last_error("encoding is not supported");
-            return Err(ERROR_INVALID_ARGUMENT);
-        }
-    };
+    let encoding = parse_csv_encoding(encoding)?;
     let configuration = CsvConfiguration::new()
         .with_delimiter(delimiter)
         .with_encoding(encoding)
@@ -835,6 +1055,174 @@ fn csv_read_options(
             HeaderMode::FirstRow
         })
         .with_trim_headers(trim_headers != 0))
+}
+
+fn parse_csv_encoding(encoding: u8) -> Result<CsvEncoding, i32> {
+    match encoding {
+        0 => Ok(CsvEncoding::Utf8),
+        1 => Ok(CsvEncoding::Utf16Le),
+        2 => Ok(CsvEncoding::Utf16Be),
+        3 => Ok(CsvEncoding::Gbk),
+        4 => Ok(CsvEncoding::Windows1252),
+        _ => {
+            set_last_error("encoding is not supported");
+            Err(ERROR_INVALID_ARGUMENT)
+        }
+    }
+}
+
+unsafe fn write_csv(
+    arguments: CsvWriteArguments,
+    append: bool,
+    out_row_count: *mut u32,
+) -> Result<i32, i32> {
+    let CsvWriteArguments {
+        path,
+        data,
+        data_length,
+        delimiter,
+        encoding,
+        write_bom,
+        print_header,
+        overwrite_file,
+    } = arguments;
+    if path.is_null() || data.is_null() || out_row_count.is_null() {
+        set_last_error("path, data, and out_row_count are required");
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    if delimiter == 0 {
+        set_last_error("delimiter must be a single-byte character");
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+
+    unsafe { ptr::write(out_row_count, 0) };
+    let path = unsafe { read_utf8(path) }?;
+    let rows = decode_rows(unsafe { std::slice::from_raw_parts(data, data_length) })?;
+    let configuration = CsvConfiguration::new()
+        .with_delimiter(delimiter)
+        .with_encoding(parse_csv_encoding(encoding)?)
+        .with_write_bom(write_bom != 0);
+    let options = CsvWriteOptions::new()
+        .with_configuration(configuration)
+        .with_print_header(print_header != 0)
+        .with_overwrite_file(overwrite_file != 0);
+    let count = if append {
+        MiniExcel::append_csv(path, &rows, &options)
+    } else {
+        MiniExcel::save_csv(path, &rows, &options)
+    }
+    .map_err(|error| {
+        set_last_error(error.to_string());
+        ERROR_WRITE
+    })?;
+    let count = u32::try_from(count).map_err(|_| {
+        set_last_error("row count exceeds the ABI limit");
+        ERROR_WRITE
+    })?;
+    unsafe { ptr::write(out_row_count, count) };
+    Ok(RESULT_BATCH)
+}
+
+fn decode_rows(bytes: &[u8]) -> Result<Vec<DynamicRow>, i32> {
+    let mut reader = FrameInput::new(bytes);
+    let row_count = reader.read_length()?;
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        let cell_count = reader.read_length()?;
+        let mut row = DynamicRow::with_capacity(cell_count);
+        for _ in 0..cell_count {
+            let name = reader.read_string()?;
+            let value = match reader.read_byte()? {
+                0 => CellValue::Empty,
+                1 => CellValue::Bool(reader.read_byte()? != 0),
+                2 => CellValue::Int(reader.read_i64()?),
+                3 => CellValue::Float(f64::from_bits(reader.read_u64()?)),
+                4 => CellValue::String(reader.read_string()?),
+                tag => {
+                    set_last_error(format!("input frame contains unsupported value tag {tag}"));
+                    return Err(ERROR_INVALID_ARGUMENT);
+                }
+            };
+            row.insert(name, value);
+        }
+        rows.push(row);
+    }
+    reader.ensure_complete()?;
+    Ok(rows)
+}
+
+struct FrameInput<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> FrameInput<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn read_byte(&mut self) -> Result<u8, i32> {
+        self.ensure_available(1)?;
+        let value = self.bytes[self.offset];
+        self.offset += 1;
+        Ok(value)
+    }
+
+    fn read_u32(&mut self) -> Result<u32, i32> {
+        self.ensure_available(4)?;
+        let mut value = [0_u8; 4];
+        value.copy_from_slice(&self.bytes[self.offset..self.offset + 4]);
+        self.offset += 4;
+        Ok(u32::from_le_bytes(value))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, i32> {
+        self.ensure_available(8)?;
+        let mut value = [0_u8; 8];
+        value.copy_from_slice(&self.bytes[self.offset..self.offset + 8]);
+        self.offset += 8;
+        Ok(u64::from_le_bytes(value))
+    }
+
+    fn read_i64(&mut self) -> Result<i64, i32> {
+        self.read_u64()
+            .map(|value| i64::from_le_bytes(value.to_le_bytes()))
+    }
+
+    fn read_length(&mut self) -> Result<usize, i32> {
+        self.read_u32().map(|value| value as usize)
+    }
+
+    fn read_string(&mut self) -> Result<String, i32> {
+        let length = self.read_length()?;
+        self.ensure_available(length)?;
+        let value = std::str::from_utf8(&self.bytes[self.offset..self.offset + length])
+            .map_err(|error| {
+                set_last_error(error.to_string());
+                ERROR_INVALID_ARGUMENT
+            })?
+            .to_owned();
+        self.offset += length;
+        Ok(value)
+    }
+
+    fn ensure_complete(&self) -> Result<(), i32> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            set_last_error("input frame contains trailing data");
+            Err(ERROR_INVALID_ARGUMENT)
+        }
+    }
+
+    fn ensure_available(&self, length: usize) -> Result<(), i32> {
+        if self.offset <= self.bytes.len().saturating_sub(length) {
+            Ok(())
+        } else {
+            set_last_error("input frame is truncated");
+            Err(ERROR_INVALID_ARGUMENT)
+        }
+    }
 }
 
 fn write_length(frame: &mut Vec<u8>, length: usize) -> Result<(), i32> {

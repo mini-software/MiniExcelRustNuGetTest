@@ -18,12 +18,85 @@ return args[0].ToLowerInvariant() switch
   "suite" => RunSuite(
     args.Length >= 2 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 1_000,
     args.Length >= 3 ? int.Parse(args[2], CultureInfo.InvariantCulture) : 32),
+  "comments" => VerifyCommentsParity(args),
   "verify" => VerifyFileParity(args),
   "generate" => GenerateBenchmarkWorkbook(args),
   "managed" => Benchmark(args, useRust: false),
   "rust" => Benchmark(args, useRust: true),
   _ => Usage()
 };
+
+static int VerifyCommentsParity(string[] arguments)
+{
+  if (arguments.Length is < 2 or > 3)
+    return Usage();
+
+  var path = Path.GetFullPath(arguments[1]);
+  var sheetName = arguments.Length == 3 ? arguments[2] : null;
+  var importer = ManagedMiniExcel.Importers.GetOpenXmlImporter();
+  var managed = importer.RetrieveComments(path, sheetName);
+  var rust = MiniExcelRust.RetrieveComments(path, sheetName);
+  Require(string.Equals(managed.SheetName, rust.SheetName, StringComparison.OrdinalIgnoreCase), "comments: sheet name differs.");
+  Require(managed.Comments.Count == rust.Comments.Count, "comments: threaded comment count differs.");
+  Require(managed.Notes.Count == rust.Notes.Count, "comments: note count differs.");
+
+  for (var index = 0; index < managed.Comments.Count; index++)
+  {
+    var expected = managed.Comments[index];
+    var actual = rust.Comments[index];
+    Require(expected.Id == actual.Id, $"comments: id differs at {index}.");
+    Require(expected.ReferenceCell == actual.ReferenceCell, $"comments: cell differs at {index}.");
+    Require(expected.Resolved == actual.Resolved, $"comments: resolved differs at {index}.");
+    Require(expected.Text == actual.Text, $"comments: text differs at {index}.");
+    Require(expected.CreatedAt == actual.CreatedAt, $"comments: timestamp differs at {index}.");
+    CompareAuthors(expected.Author, actual.Author, $"comments[{index}].author");
+    Require(expected.Replies.Count == actual.Replies.Count, $"comments: reply count differs at {index}.");
+    for (var replyIndex = 0; replyIndex < expected.Replies.Count; replyIndex++)
+    {
+      var expectedReply = expected.Replies[replyIndex];
+      var actualReply = actual.Replies[replyIndex];
+      Require(expectedReply.Id == actualReply.Id, $"comments: reply id differs at {index},{replyIndex}.");
+      Require(expectedReply.ParentId == actualReply.ParentId, $"comments: parent id differs at {index},{replyIndex}.");
+      Require(expectedReply.Text == actualReply.Text, $"comments: reply text differs at {index},{replyIndex}.");
+      Require(expectedReply.CreatedAt == actualReply.CreatedAt, $"comments: reply timestamp differs at {index},{replyIndex}.");
+      CompareAuthors(expectedReply.Author, actualReply.Author, $"comments[{index}].replies[{replyIndex}].author");
+    }
+  }
+
+  var missingNoteIds = 0;
+  for (var index = 0; index < managed.Notes.Count; index++)
+  {
+    var expected = managed.Notes[index];
+    var actual = rust.Notes[index];
+    Require(expected.ReferenceCell == actual.ReferenceCell, $"comments: note cell differs at {index}.");
+    Require(expected.Author == actual.Author, $"comments: note author differs at {index}.");
+    Require(expected.Text == actual.Text, $"comments: note text differs at {index}.");
+    if (actual.Id is null)
+      missingNoteIds++;
+    else
+      Require(expected.Id == actual.Id, $"comments: note id differs at {index}.");
+  }
+
+  using var stream = File.OpenRead(path);
+  var streamResult = MiniExcelRust.RetrieveComments(stream, sheetName, leaveOpen: true);
+  Require(streamResult.Comments.Count == rust.Comments.Count, "comments-stream: comment count differs.");
+  Require(stream.CanRead, "comments-stream: leaveOpen should preserve the stream.");
+  Console.WriteLine($"Verified comments for {rust.SheetName}; missing Rust legacy-note IDs: {missingNoteIds}.");
+  return 0;
+}
+
+static void CompareAuthors(
+  MiniExcelLib.OpenXml.Models.Author? expected,
+  MiniExcelRustCommentAuthor? actual,
+  string scenario)
+{
+  Require((expected is null) == (actual is null), $"{scenario}: presence differs.");
+  if (expected is null || actual is null)
+    return;
+  Require(expected.Id == actual.Id, $"{scenario}: id differs.");
+  Require(expected.DisplayName == actual.DisplayName, $"{scenario}: display name differs.");
+  Require(expected.ProviderId == actual.ProviderId, $"{scenario}: provider id differs.");
+}
 
 static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
 {
@@ -35,6 +108,8 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     File.WriteAllText(csvPath, "Name;Note\r\nalpha;\"Taiwan 台灣\"\r\nbeta;\r\n", new UTF8Encoding(true));
     VerifyParity(workbookPath);
     VerifyCsvParity(csvPath);
+    VerifySaveAs();
+    VerifyCsvWrite();
     VerifyLifecycle(workbookPath, lifecycleIterations, maxPrivateGrowthMb);
     Console.WriteLine("MiniExcelRust parity and lifecycle suite passed.");
     return 0;
@@ -45,6 +120,109 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
       File.Delete(workbookPath);
     if (File.Exists(csvPath))
       File.Delete(csvPath);
+  }
+}
+
+static void VerifySaveAs()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-write-{Guid.NewGuid():N}.xlsx");
+  var rows = new List<IDictionary<string, object?>>
+  {
+    new Dictionary<string, object?> { ["Name"] = "alpha", ["Value"] = 42d, ["Enabled"] = true },
+    new Dictionary<string, object?> { ["Name"] = "beta", ["Value"] = null, ["Enabled"] = false }
+  };
+  try
+  {
+    var written = MiniExcelRust.SaveAs(path, rows, sheetName: "Exported");
+    Require(written == rows.Count, $"save-as: expected {rows.Count} written rows, received {written}.");
+    var managedRows = QueryManaged(path, true, "Exported").ToList();
+    var rustRows = MiniExcelRust.Query(path, true, "Exported").ToList();
+    CompareRows(managedRows, rustRows, "save-as-roundtrip");
+    CompareRows(rows, rustRows, "save-as-input");
+
+    var rejectedExistingFile = false;
+    try
+    {
+      MiniExcelRust.SaveAs(path, rows);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedExistingFile = true;
+    }
+    Require(rejectedExistingFile, "save-as: overwrite=false should reject an existing file.");
+
+    written = MiniExcelRust.SaveAs(path, rows, sheetName: "Exported", overwriteFile: true);
+    Require(written == rows.Count, "save-as: overwrite=true did not rewrite the workbook.");
+
+    using (var stream = new MemoryStream())
+    {
+      written = MiniExcelRust.SaveAs(stream, rows, sheetName: "Streamed", leaveOpen: true);
+      Require(written == rows.Count, "save-as-stream: row count differs.");
+      Require(stream.CanWrite, "save-as-stream: leaveOpen should preserve the stream.");
+      stream.Position = 0;
+      var importer = ManagedMiniExcel.Importers.GetOpenXmlImporter();
+      var managedStreamRows = importer.Query(stream, true, "Streamed", leaveOpen: true)
+        .Cast<IDictionary<string, object?>>()
+        .ToList();
+      CompareRows(rows, managedStreamRows, "save-as-stream");
+    }
+
+    var closingStream = new MemoryStream();
+    MiniExcelRust.SaveAs(closingStream, rows);
+    Require(!closingStream.CanWrite, "save-as-stream: the default should close the stream.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
+static void VerifyCsvWrite()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-write-{Guid.NewGuid():N}.csv");
+  var initialRows = new List<IDictionary<string, object?>>
+  {
+    new Dictionary<string, object?> { ["Name"] = "alpha", ["Value"] = 42d },
+    new Dictionary<string, object?> { ["Name"] = "台灣", ["Value"] = string.Empty }
+  };
+  var appendedRows = new List<IDictionary<string, object?>>
+  {
+    new Dictionary<string, object?> { ["Name"] = "omega", ["Value"] = -7.5d }
+  };
+  var writeOptions = new MiniExcelRustCsvWriteOptions { Delimiter = ';' };
+  var readOptions = new MiniExcelRustCsvReadOptions { Delimiter = ';' };
+  try
+  {
+    var written = MiniExcelRust.SaveAsCsv(path, initialRows, writeOptions);
+    Require(written == initialRows.Count, "csv-write: initial row count differs.");
+
+    var rejectedExistingFile = false;
+    try
+    {
+      MiniExcelRust.SaveAsCsv(path, initialRows, writeOptions);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedExistingFile = true;
+    }
+    Require(rejectedExistingFile, "csv-write: overwrite=false should reject an existing file.");
+
+    written = MiniExcelRust.AppendCsv(path, appendedRows, writeOptions);
+    Require(written == appendedRows.Count, "csv-append: appended row count differs.");
+
+    var importer = ManagedMiniExcel.Importers.GetCsvImporter();
+    var managedRows = importer.Query(path, true, new CsvConfiguration { Seperator = ';' })
+      .Cast<IDictionary<string, object?>>()
+      .ToList();
+    var rustRows = MiniExcelRust.QueryCsv(path, true, readOptions).ToList();
+    CompareRows(managedRows, rustRows, "csv-write-roundtrip");
+    Require(rustRows.Count == 3, $"csv-write-roundtrip: expected 3 rows, received {rustRows.Count}.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
   }
 }
 
@@ -711,6 +889,7 @@ static void AddEntry(ZipArchive archive, string name, string contents)
   {
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  PublicNuGetSmoke suite [lifecycle-iterations] [max-private-growth-mb]");
+    Console.Error.WriteLine("  PublicNuGetSmoke comments <xlsx-path> [sheet-name]");
     Console.Error.WriteLine("  PublicNuGetSmoke verify <xlsx-path> [use-header-row]");
     Console.Error.WriteLine("  PublicNuGetSmoke generate <xlsx-path> [rows] [columns]");
     Console.Error.WriteLine("  PublicNuGetSmoke <managed|rust> <xlsx-path> [passes] [warmup-passes]");
