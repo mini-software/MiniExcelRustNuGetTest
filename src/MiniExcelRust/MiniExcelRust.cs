@@ -14,6 +14,62 @@ public static class MiniExcelRust
 {
     private const int BatchSize = 64;
 
+    public static IEnumerable<T> Query<T>(
+        string path,
+        string? sheetName = null,
+        string startCell = "A1",
+        bool treatHeaderAsData = false,
+        MiniExcelRustReadOptions? configuration = null)
+        where T : class, new()
+    {
+        return MiniExcelRustMapper.Map<T>(
+            Query(path, !treatHeaderAsData, sheetName, startCell, configuration));
+    }
+
+    public static IEnumerable<T> Query<T>(
+        Stream stream,
+        string? sheetName = null,
+        string startCell = "A1",
+        bool treatHeaderAsData = false,
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false)
+        where T : class, new()
+    {
+        return MiniExcelRustMapper.Map<T>(
+            Query(stream, !treatHeaderAsData, sheetName, startCell, configuration, leaveOpen));
+    }
+
+    public static IEnumerable<T> QueryRange<T>(
+        string path,
+        string? sheetName = null,
+        string startCell = "A1",
+        string? endCell = null,
+        bool treatHeaderAsData = false,
+        MiniExcelRustReadOptions? configuration = null)
+        where T : class, new()
+    {
+        return MiniExcelRustMapper.Map<T>(
+            QueryRange(path, !treatHeaderAsData, sheetName, startCell, endCell, configuration));
+    }
+
+    public static IEnumerable<T> QueryTable<T>(
+        string path,
+        string? sheetName = null,
+        string tableName = "Table1")
+        where T : class, new()
+    {
+        return MiniExcelRustMapper.Map<T>(QueryTable(path, sheetName, tableName));
+    }
+
+    public static IEnumerable<T> QueryCsv<T>(
+        string path,
+        bool treatHeaderAsData = false,
+        MiniExcelRustCsvReadOptions? configuration = null)
+        where T : class, new()
+    {
+        return MiniExcelRustMapper.Map<T>(QueryCsv(path, !treatHeaderAsData, configuration));
+    }
+
     /// <summary>
     /// Returns worksheet names in workbook order.
     /// </summary>
@@ -683,6 +739,47 @@ public static class MiniExcelRust
         return WriteCsv(path, rows, configuration, append: true);
     }
 
+    public static void RenameSheet(string path, string sheetName, string newSheetName)
+    {
+        ValidatePathAndSheet(path, sheetName);
+        if (string.IsNullOrWhiteSpace(newSheetName))
+            throw new ArgumentException("The new sheet name is required.", nameof(newSheetName));
+        EnsureAbiVersion();
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        using var nativeNewSheetName = new Utf8String(newSheetName);
+        var result = NativeMethods.RenameSheet(nativePath.Pointer, nativeSheetName.Pointer, nativeNewSheetName.Pointer);
+        if (result < 0)
+            throw CreateNativeException(result);
+    }
+
+    public static void ReorderSheet(string path, string sheetName, int newSheetIndex)
+    {
+        ValidatePathAndSheet(path, sheetName);
+        EnsureAbiVersion();
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var result = NativeMethods.ReorderSheet(nativePath.Pointer, nativeSheetName.Pointer, newSheetIndex);
+        if (result < 0)
+            throw CreateNativeException(result);
+    }
+
+    public static void SetSheetVisibility(
+        string path,
+        string sheetName,
+        MiniExcelRustSheetState visibility)
+    {
+        ValidatePathAndSheet(path, sheetName);
+        if (visibility is < MiniExcelRustSheetState.Visible or > MiniExcelRustSheetState.VeryHidden)
+            throw new ArgumentOutOfRangeException(nameof(visibility));
+        EnsureAbiVersion();
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var result = NativeMethods.SetSheetVisibility(nativePath.Pointer, nativeSheetName.Pointer, (byte)visibility);
+        if (result < 0)
+            throw CreateNativeException(result);
+    }
+
     private static IEnumerable<IDictionary<string, object?>> QueryStreamIterator(
         Stream stream,
         bool useHeaderRow,
@@ -1182,6 +1279,14 @@ public static class MiniExcelRust
             throw new ArgumentException("The CSV delimiter must be a single-byte ASCII character.", nameof(configuration));
     }
 
+    private static void ValidatePathAndSheet(string path, string sheetName)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (string.IsNullOrWhiteSpace(sheetName))
+            throw new ArgumentException("The sheet name is required.", nameof(sheetName));
+    }
+
     private static void DeleteTemporaryFile(string? path)
     {
         if (path is not null && File.Exists(path))
@@ -1504,6 +1609,15 @@ public static class MiniExcelRust
             byte writeBom,
             byte printHeader,
             out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_rename_sheet", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int RenameSheet(IntPtr path, IntPtr sheetName, IntPtr newSheetName);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_reorder_sheet", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ReorderSheet(IntPtr path, IntPtr sheetName, int newSheetIndex);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_set_sheet_visibility", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SetSheetVisibility(IntPtr path, IntPtr sheetName, byte visibility);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_buffer_close", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void BufferClose(IntPtr handle);

@@ -8,6 +8,7 @@ using MiniExcelLib;
 using MiniExcelLib.Csv;
 using MiniExcelLib.OpenXml;
 using MiniExcelLibs;
+using MiniExcelLibs.Attributes;
 using ManagedMiniExcel = MiniExcelLib.MiniExcel;
 
 if (args.Length == 0)
@@ -110,6 +111,8 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifyCsvParity(csvPath);
     VerifySaveAs();
     VerifyCsvWrite();
+    VerifyTypedConversions();
+    VerifyWorkbookMutations(workbookPath);
     VerifyLifecycle(workbookPath, lifecycleIterations, maxPrivateGrowthMb);
     Console.WriteLine("MiniExcelRust parity and lifecycle suite passed.");
     return 0;
@@ -226,6 +229,66 @@ static void VerifyCsvWrite()
   }
 }
 
+static void VerifyTypedConversions()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-{Guid.NewGuid():N}.csv");
+  var identifier = Guid.Parse("1ad46df8-08df-4ca6-8528-f79068fc23ea");
+  try
+  {
+    File.WriteAllText(
+      path,
+      $"Identifier,State,Count,Optional\r\n{identifier},Ready,12,\r\n",
+      new UTF8Encoding(true));
+    var managedConfiguration = new CsvConfiguration { ReadEmptyStringAsNull = true };
+    var rustConfiguration = new MiniExcelRustCsvReadOptions { ReadEmptyStringAsNull = true };
+    var importer = ManagedMiniExcel.Importers.GetCsvImporter();
+    var managed = importer.Query<TypedConversionRow>(path, configuration: managedConfiguration).Single();
+    var rust = MiniExcelRust.QueryCsv<TypedConversionRow>(path, configuration: rustConfiguration).Single();
+    Require(managed.Identifier == rust.Identifier && rust.Identifier == identifier, "typed-conversion: GUID differs.");
+    Require(managed.State == rust.State && rust.State == RowState.Ready, "typed-conversion: enum differs.");
+    Require(managed.Count == rust.Count && rust.Count == 12, "typed-conversion: integer differs.");
+    Require(managed.Optional == rust.Optional && rust.Optional is null, "typed-conversion: nullable differs.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
+static void VerifyWorkbookMutations(string sourcePath)
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-mutate-{Guid.NewGuid():N}.xlsx");
+  File.Copy(sourcePath, path);
+  try
+  {
+    MiniExcelRust.RenameSheet(path, "Data", "Archive");
+    MiniExcelRust.ReorderSheet(path, "Archive", 0);
+    MiniExcelRust.SetSheetVisibility(path, "Sheet1", MiniExcelRustSheetState.VeryHidden);
+
+    var importer = ManagedMiniExcel.Importers.GetOpenXmlImporter();
+    var managedNames = importer.GetSheetNames(path);
+    var rustNames = MiniExcelRust.GetSheetNames(path);
+    Require(managedNames.SequenceEqual(rustNames, StringComparer.Ordinal), "sheet-mutation: names differ.");
+    Require(rustNames.SequenceEqual(new[] { "Archive", "Sheet1", "Options" }, StringComparer.Ordinal), "sheet-mutation: order differs.");
+
+    var managedInfo = importer.GetSheetInformations(path);
+    var rustInfo = MiniExcelRust.GetSheetInformations(path);
+    Require(managedInfo.Count == rustInfo.Count, "sheet-mutation: info count differs.");
+    for (var index = 0; index < managedInfo.Count; index++)
+    {
+      Require(managedInfo[index].Name == rustInfo[index].Name, $"sheet-mutation: name differs at {index}.");
+      Require(managedInfo[index].State.ToString() == rustInfo[index].State.ToString(), $"sheet-mutation: state differs at {index}.");
+    }
+    Require(rustInfo.Single(sheet => sheet.Name == "Sheet1").State == MiniExcelRustSheetState.VeryHidden, "sheet-mutation: visibility was not updated.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
 static void VerifyCsvParity(string path)
 {
   var managedConfiguration = new CsvConfiguration
@@ -244,6 +307,15 @@ static void VerifyCsvParity(string path)
   CompareRows(managedRows, rustRows, "csv");
   Require(rustRows.Count == 2, $"csv: expected 2 rows, received {rustRows.Count}.");
   Require(Equals(rustRows[1]["Note"], string.Empty), "csv: empty field should remain an empty string.");
+
+  var managedTypedRows = importer.Query<TypedCsvRow>(path, configuration: managedConfiguration).ToList();
+  var rustTypedRows = MiniExcelRust.QueryCsv<TypedCsvRow>(path, configuration: rustConfiguration).ToList();
+  Require(managedTypedRows.Count == rustTypedRows.Count, "csv-typed: row count differs.");
+  for (var index = 0; index < managedTypedRows.Count; index++)
+  {
+    Require(managedTypedRows[index].Name == rustTypedRows[index].Name, $"csv-typed: name differs at {index}.");
+    Require(managedTypedRows[index].Note == rustTypedRows[index].Note, $"csv-typed: note differs at {index}.");
+  }
 
   var managedColumns = importer.GetColumnNames(path, true, managedConfiguration);
   var rustColumns = MiniExcelRust.GetCsvColumnNames(path, true, rustConfiguration);
@@ -381,6 +453,20 @@ static void VerifyParity(string path)
   Require(Equals(rows[1]["Value"], true), "The boolean value did not match.");
   Require(rows[1]["Note"] is null, "The empty value should be null.");
 
+  var managedTypedRows = importer.Query<TypedSheetRow>(path, "Sheet1").ToList();
+  var rustTypedRows = MiniExcelRust.Query<TypedSheetRow>(path, "Sheet1").ToList();
+  CompareTypedRows(managedTypedRows, rustTypedRows, "typed-query");
+  var managedAliases = importer.Query<TypedAliasRow>(path, "Sheet1").ToList();
+  var rustAliases = MiniExcelRust.Query<TypedAliasRow>(path, "Sheet1").ToList();
+  Require(
+    managedAliases.Select(row => row.Label).SequenceEqual(rustAliases.Select(row => row.Label)),
+    "typed-alias: values differ.");
+
+  var typedTableRows = MiniExcelRust.QueryTable<TypedTableRow>(path, "Data", "DataTable").ToList();
+  Require(
+    typedTableRows.Count == 2 && typedTableRows[0].Code == "x" && typedTableRows[0].Amount == 3.5d,
+    "typed-table: values differ.");
+
   var managedTable = importer.QueryAsDataTable(path, true, "Sheet1");
   var rustTable = MiniExcelRust.QueryAsDataTable(path, true, "Sheet1");
   CompareDataTables(managedTable, rustTable, "data-table");
@@ -405,6 +491,20 @@ static void CompareDataTables(DataTable expected, DataTable actual, string scena
   {
     for (var column = 0; column < expected.Columns.Count; column++)
       Require(Equals(expected.Rows[row][column], actual.Rows[row][column]), $"{scenario}: value differs at {row},{column}.");
+  }
+}
+
+static void CompareTypedRows(
+  IReadOnlyList<TypedSheetRow> expected,
+  IReadOnlyList<TypedSheetRow> actual,
+  string scenario)
+{
+  Require(expected.Count == actual.Count, $"{scenario}: row count differs.");
+  for (var index = 0; index < expected.Count; index++)
+  {
+    Require(expected[index].Name == actual[index].Name, $"{scenario}: name differs at {index}.");
+    Require(Equals(expected[index].Value, actual[index].Value), $"{scenario}: value differs at {index}.");
+    Require(expected[index].Note == actual[index].Note, $"{scenario}: note differs at {index}.");
   }
 }
 
@@ -909,3 +1009,42 @@ static void AddEntry(ZipArchive archive, string name, string contents)
     double ElapsedMilliseconds,
     double FirstRowMilliseconds,
     long AllocatedBytes);
+
+  internal sealed class TypedSheetRow
+  {
+    public string? Name { get; set; }
+    public object? Value { get; set; }
+    public string? Note { get; set; }
+  }
+
+  internal sealed class TypedAliasRow
+  {
+    [ExcelColumnName("Name")]
+    public string? Label { get; set; }
+  }
+
+  internal sealed class TypedTableRow
+  {
+    public string? Code { get; set; }
+    public double Amount { get; set; }
+  }
+
+  internal sealed class TypedCsvRow
+  {
+    public string? Name { get; set; }
+    public string? Note { get; set; }
+  }
+
+  internal sealed class TypedConversionRow
+  {
+    public Guid Identifier { get; set; }
+    public RowState State { get; set; }
+    public int Count { get; set; }
+    public int? Optional { get; set; }
+  }
+
+  internal enum RowState
+  {
+    Unknown,
+    Ready
+  }

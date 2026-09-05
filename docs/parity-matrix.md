@@ -31,7 +31,7 @@ limits; **Missing** has no production implementation yet.
 | Adapters | `GetReader` | Partial | Single selected sheet and materialized rows; no `NextResult` yet |
 | Async | Metadata tasks | Partial | Runs Rust operation on a worker; no in-flight native cancellation |
 | Async | `IAsyncEnumerable<T>` query | Missing | Requires cancellable native iterator and netstandard async interfaces |
-| Typed read | POCO/attribute mapping | Missing | Requires schema/mapping plan and conversion parity |
+| Typed read | POCO/attribute mapping | Partial | Properties, name aliases, GUID, enum, integer and nullable conversions verified; full attributes/culture/errors remain |
 | Comments | Notes/threaded comments | Verified | Path/stream, authors, timestamps, replies, resolved state and legacy notes |
 | CSV read | Dynamic query, path/stream | Verified | Header, delimiter, BOM, Unicode, quoted text and empty string |
 | CSV metadata | Column names | Verified | Path, stream, sync and task-based async |
@@ -39,7 +39,8 @@ limits; **Missing** has no production implementation yet.
 | CSV write | Dynamic save/append, path | Partial | Delimiter, BOM, header, overwrite and append verified; stream, typed and async remain |
 | XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Basic scalars and overwrite behavior verified; temporal values, schema, styles and multi-sheet remain |
 | XLSX write | Typed/async/multi-sheet export | Missing | Rust core exists; input schema/callback ABI required |
-| Workbook edits | Insert/copy/alter | Missing | Rust core is partial; package-preservation tests required |
+| Workbook edits | Rename/reorder/visibility | Verified | Atomic path operations checked through C# and Rust metadata readers |
+| Workbook edits | Insert/copy-and-add | Missing | Row/schema ABI and package-preservation tests required |
 | Templates | Fill/merge | Missing | Rust core is partial; formula and relationship parity required |
 | Pictures | AddPicture | Missing | Rust core implementation required |
 | Fluent mapping | Read/write/template | Missing | Managed mapping plan plus Rust execution required |

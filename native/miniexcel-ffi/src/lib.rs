@@ -809,6 +809,94 @@ pub unsafe extern "C" fn miniexcel_append_csv(
     })
 }
 
+/// Atomically renames a worksheet in an existing XLSX workbook.
+///
+/// # Safety
+///
+/// All string pointers must be non-null, valid, null-terminated UTF-8 for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_rename_sheet(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    new_sheet_name: *const c_char,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || sheet_name.is_null() || new_sheet_name.is_null() {
+            set_last_error("path, sheet_name, and new_sheet_name are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let path = unsafe { read_utf8(path) }?;
+        let sheet_name = unsafe { read_utf8(sheet_name) }?;
+        let new_sheet_name = unsafe { read_utf8(new_sheet_name) }?;
+        MiniExcel::rename_sheet(path, sheet_name, new_sheet_name).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Atomically moves a worksheet to a zero-based index.
+///
+/// # Safety
+///
+/// Both string pointers must be non-null, valid, null-terminated UTF-8 for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_reorder_sheet(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    new_sheet_index: i32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || sheet_name.is_null() {
+            set_last_error("path and sheet_name are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let path = unsafe { read_utf8(path) }?;
+        let sheet_name = unsafe { read_utf8(sheet_name) }?;
+        MiniExcel::reorder_sheet(path, sheet_name, new_sheet_index).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Atomically changes a worksheet visibility state.
+///
+/// # Safety
+///
+/// Both string pointers must be non-null, valid, null-terminated UTF-8 for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_set_sheet_visibility(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    visibility: u8,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || sheet_name.is_null() {
+            set_last_error("path and sheet_name are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let visibility = match visibility {
+            0 => SheetVisibility::Visible,
+            1 => SheetVisibility::Hidden,
+            2 => SheetVisibility::VeryHidden,
+            _ => {
+                set_last_error("visibility is not supported");
+                return Err(ERROR_INVALID_ARGUMENT);
+            }
+        };
+        let path = unsafe { read_utf8(path) }?;
+        let sheet_name = unsafe { read_utf8(sheet_name) }?;
+        MiniExcel::set_sheet_visibility(path, sheet_name, visibility).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        Ok(RESULT_BATCH)
+    })
+}
+
 /// Releases a buffer returned by a metadata operation.
 ///
 /// # Safety

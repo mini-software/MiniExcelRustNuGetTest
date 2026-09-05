@@ -36,6 +36,8 @@ foreach (var row in MiniExcelRust.Query("input.xlsx", useHeaderRow: true))
 {
     Console.WriteLine(row["Name"]);
 }
+
+var typedRows = MiniExcelRust.Query<MyRow>("input.xlsx");
 ```
 
 `Query` accepts `path`, `useHeaderRow`, `sheetName`, and `startCell`. Each streamed row is
