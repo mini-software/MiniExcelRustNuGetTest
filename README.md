@@ -102,7 +102,7 @@ workflow runs on Windows, Linux, and macOS for x64 and Arm64; musl remains cover
 Alpine correctness and lifecycle job because GitHub does not provide native musl runners.
 
 The latest checked-in cross-platform summary and per-RID reports are in the
-[benchmark results](https://github.com/mini-software/MiniExcelRust/blob/main/docs/benchmarks/README.md).
+[benchmark results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md).
 Each report includes elapsed time, first-row latency, managed allocation, peak process memory,
 environment metadata, and a JSON file containing all raw iterations and hashes.
 

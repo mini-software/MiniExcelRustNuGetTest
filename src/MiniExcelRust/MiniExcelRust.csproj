@@ -15,8 +15,8 @@
     <Company>Mini-Software</Company>
     <PackageTags>excel;xlsx;rust;native;streaming</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/mini-software/MiniExcelRust</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/mini-software/MiniExcelRust</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/mini-software/MiniExcelRustNuGetTest</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mini-software/MiniExcelRustNuGetTest</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
