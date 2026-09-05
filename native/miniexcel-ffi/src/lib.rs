@@ -4,7 +4,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::str::FromStr;
 
-use miniexcel::{CellReference, CellValue, DynamicRow, HeaderMode, MiniExcel, ReadOptions};
+use miniexcel::{
+    CellReference, CellValue, CsvConfiguration, CsvEncoding, CsvReadOptions, DynamicRow,
+    HeaderMode, MiniExcel, ReadOptions, SheetType, SheetVisibility,
+};
 
 const ABI_VERSION: u32 = 1;
 const RESULT_END: i32 = 0;
@@ -20,6 +23,24 @@ thread_local! {
 pub struct QueryHandle {
     rows: Box<dyn Iterator<Item = miniexcel::Result<DynamicRow>> + Send>,
     frame: Vec<u8>,
+}
+
+pub struct BufferHandle {
+    frame: Vec<u8>,
+}
+
+struct QueryOpenOptions {
+    path: *const c_char,
+    use_header_row: u8,
+    sheet_name: *const c_char,
+    start_cell: *const c_char,
+    end_cell: *const c_char,
+    ignore_empty_rows: u8,
+    fill_merged_cells: u8,
+    trim_headers: u8,
+    enable_shared_string_cache: u8,
+    shared_string_cache_size: u64,
+    shared_string_cache_path: *const c_char,
 }
 
 #[unsafe(no_mangle)]
@@ -41,35 +62,136 @@ pub unsafe extern "C" fn miniexcel_query_open(
     start_cell: *const c_char,
     out_handle: *mut *mut QueryHandle,
 ) -> i32 {
+    ffi_result(|| unsafe {
+        open_query(
+            QueryOpenOptions {
+                path,
+                use_header_row,
+                sheet_name,
+                start_cell,
+                end_cell: ptr::null(),
+                ignore_empty_rows: 0,
+                fill_merged_cells: 0,
+                trim_headers: 1,
+                enable_shared_string_cache: 1,
+                shared_string_cache_size: 5 * 1024 * 1024,
+                shared_string_cache_path: ptr::null(),
+            },
+            out_handle,
+        )
+    })
+}
+
+/// Opens a bounded path-based XLSX query and returns an opaque native handle.
+///
+/// # Safety
+///
+/// String pointers must be null-terminated UTF-8. `path`, `start_cell`, and `out_handle` must be
+/// non-null and valid for the duration of the call. `sheet_name` and `end_cell` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_query_range_open(
+    path: *const c_char,
+    use_header_row: u8,
+    sheet_name: *const c_char,
+    start_cell: *const c_char,
+    end_cell: *const c_char,
+    out_handle: *mut *mut QueryHandle,
+) -> i32 {
+    ffi_result(|| unsafe {
+        open_query(
+            QueryOpenOptions {
+                path,
+                use_header_row,
+                sheet_name,
+                start_cell,
+                end_cell,
+                ignore_empty_rows: 0,
+                fill_merged_cells: 0,
+                trim_headers: 1,
+                enable_shared_string_cache: 1,
+                shared_string_cache_size: 5 * 1024 * 1024,
+                shared_string_cache_path: ptr::null(),
+            },
+            out_handle,
+        )
+    })
+}
+
+/// Opens a configured path-based XLSX query and returns an opaque native handle.
+///
+/// # Safety
+///
+/// Required string and output pointers must be non-null and valid for the duration of the call.
+/// `sheet_name`, `end_cell`, and `shared_string_cache_path` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_query_options_open(
+    path: *const c_char,
+    use_header_row: u8,
+    sheet_name: *const c_char,
+    start_cell: *const c_char,
+    end_cell: *const c_char,
+    ignore_empty_rows: u8,
+    fill_merged_cells: u8,
+    trim_headers: u8,
+    enable_shared_string_cache: u8,
+    shared_string_cache_size: u64,
+    shared_string_cache_path: *const c_char,
+    out_handle: *mut *mut QueryHandle,
+) -> i32 {
+    ffi_result(|| unsafe {
+        open_query(
+            QueryOpenOptions {
+                path,
+                use_header_row,
+                sheet_name,
+                start_cell,
+                end_cell,
+                ignore_empty_rows,
+                fill_merged_cells,
+                trim_headers,
+                enable_shared_string_cache,
+                shared_string_cache_size,
+                shared_string_cache_path,
+            },
+            out_handle,
+        )
+    })
+}
+
+/// Opens a path-based query over a named OpenXML table.
+///
+/// # Safety
+///
+/// `path`, `table_name`, and `out_handle` must be non-null and valid for the duration of the call.
+/// `sheet_name` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_query_table_open(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    table_name: *const c_char,
+    out_handle: *mut *mut QueryHandle,
+) -> i32 {
     ffi_result(|| {
-        if path.is_null() || start_cell.is_null() || out_handle.is_null() {
-            set_last_error("path, start_cell, and out_handle are required");
+        if path.is_null() || table_name.is_null() || out_handle.is_null() {
+            set_last_error("path, table_name, and out_handle are required");
             return Err(ERROR_INVALID_ARGUMENT);
         }
 
+        unsafe { ptr::write(out_handle, ptr::null_mut()) };
         let path = unsafe { read_utf8(path) }?;
-        let start_cell = unsafe { read_utf8(start_cell) }?;
-        let start_cell = CellReference::from_str(start_cell).map_err(|error| {
-            set_last_error(error.to_string());
-            ERROR_INVALID_ARGUMENT
-        })?;
-
-        let mut options = ReadOptions::new()
-            .with_header_mode(if use_header_row == 0 {
-                HeaderMode::None
-            } else {
-                HeaderMode::FirstRow
-            })
-            .with_start_cell(start_cell);
-
-        if !sheet_name.is_null() {
-            let sheet_name = unsafe { read_utf8(sheet_name) }?;
-            if !sheet_name.is_empty() {
-                options = options.with_sheet_name(sheet_name);
-            }
+        let table_name = unsafe { read_utf8(table_name) }?;
+        if table_name.is_empty() {
+            set_last_error("table_name cannot be empty");
+            return Err(ERROR_INVALID_ARGUMENT);
         }
+        let sheet_name = if sheet_name.is_null() {
+            None
+        } else {
+            let value = unsafe { read_utf8(sheet_name) }?;
+            (!value.is_empty()).then_some(value)
+        };
 
-        let rows = MiniExcel::query_with_options(path, &options).map_err(|error| {
+        let rows = MiniExcel::query_table(path, table_name, sheet_name).map_err(|error| {
             set_last_error(error.to_string());
             ERROR_QUERY
         })?;
@@ -78,6 +200,106 @@ pub unsafe extern "C" fn miniexcel_query_open(
             frame: Vec::new(),
         });
         unsafe { ptr::write(out_handle, Box::into_raw(handle)) };
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Opens a path-based CSV query using explicit read options.
+///
+/// # Safety
+///
+/// `path` and `out_handle` must be non-null and valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_query_csv_open(
+    path: *const c_char,
+    use_header_row: u8,
+    delimiter: u8,
+    encoding: u8,
+    read_empty_as_null: u8,
+    trim_headers: u8,
+    out_handle: *mut *mut QueryHandle,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || out_handle.is_null() {
+            set_last_error("path and out_handle are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        if delimiter == 0 {
+            set_last_error("delimiter must be a single-byte character");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe { ptr::write(out_handle, ptr::null_mut()) };
+        let path = unsafe { read_utf8(path) }?;
+        let options = csv_read_options(
+            use_header_row,
+            delimiter,
+            encoding,
+            read_empty_as_null,
+            trim_headers,
+        )?;
+        let rows = MiniExcel::query_csv_with_options(path, &options).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let handle = Box::new(QueryHandle {
+            rows,
+            frame: Vec::new(),
+        });
+        unsafe { ptr::write(out_handle, Box::into_raw(handle)) };
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Returns selected CSV column names through an owned metadata buffer.
+///
+/// # Safety
+///
+/// `path` and all output pointers must be non-null and valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_get_csv_columns(
+    path: *const c_char,
+    use_header_row: u8,
+    delimiter: u8,
+    encoding: u8,
+    read_empty_as_null: u8,
+    trim_headers: u8,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || out_handle.is_null() || out_data.is_null() || out_length.is_null() {
+            set_last_error("path, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+
+        let path = unsafe { read_utf8(path) }?;
+        let options = csv_read_options(
+            use_header_row,
+            delimiter,
+            encoding,
+            read_empty_as_null,
+            trim_headers,
+        )?;
+        let columns = MiniExcel::get_csv_columns(path, &options).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let handle = Box::new(BufferHandle {
+            frame: write_strings(columns)?,
+        });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
         Ok(RESULT_BATCH)
     })
 }
@@ -147,6 +369,254 @@ pub unsafe extern "C" fn miniexcel_query_close(handle: *mut QueryHandle) {
     }
 }
 
+/// Returns worksheet names in workbook order using memory owned by an opaque buffer handle.
+///
+/// # Safety
+///
+/// `path`, `out_handle`, `out_data`, and `out_length` must be non-null and valid for the duration
+/// of the call. Returned data remains valid until `miniexcel_buffer_close` closes the handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_get_sheet_names(
+    path: *const c_char,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || out_handle.is_null() || out_data.is_null() || out_length.is_null() {
+            set_last_error("path, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+
+        let path = unsafe { read_utf8(path) }?;
+        let names = MiniExcel::get_sheet_names(path).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let mut frame = Vec::new();
+        write_length(&mut frame, names.len())?;
+        for name in names {
+            write_string(&mut frame, name)?;
+        }
+
+        let handle = Box::new(BufferHandle { frame });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Returns selected column names using memory owned by an opaque buffer handle.
+///
+/// # Safety
+///
+/// `path`, `start_cell`, and all output pointers must be non-null and valid for the duration of
+/// the call. `sheet_name` may be null. Returned data remains valid until the handle is closed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_get_columns(
+    path: *const c_char,
+    use_header_row: u8,
+    sheet_name: *const c_char,
+    start_cell: *const c_char,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null()
+            || start_cell.is_null()
+            || out_handle.is_null()
+            || out_data.is_null()
+            || out_length.is_null()
+        {
+            set_last_error("path, start_cell, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+
+        let path = unsafe { read_utf8(path) }?;
+        let start_cell = unsafe { read_utf8(start_cell) }?;
+        let start_cell = CellReference::from_str(start_cell).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let mut options = ReadOptions::new()
+            .with_header_mode(if use_header_row == 0 {
+                HeaderMode::None
+            } else {
+                HeaderMode::FirstRow
+            })
+            .with_start_cell(start_cell);
+
+        if !sheet_name.is_null() {
+            let sheet_name = unsafe { read_utf8(sheet_name) }?;
+            if !sheet_name.is_empty() {
+                options = options.with_sheet_name(sheet_name);
+            }
+        }
+
+        let columns = MiniExcel::get_columns(path, &options).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let handle = Box::new(BufferHandle {
+            frame: write_strings(columns)?,
+        });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Returns worksheet dimensions as optional A1 start/end address pairs.
+///
+/// # Safety
+///
+/// `path` and all output pointers must be non-null and valid for the duration of the call.
+/// Returned data remains valid until the buffer handle is closed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_get_sheet_dimensions(
+    path: *const c_char,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || out_handle.is_null() || out_data.is_null() || out_length.is_null() {
+            set_last_error("path, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+
+        let path = unsafe { read_utf8(path) }?;
+        let dimensions = MiniExcel::get_sheet_dimensions(path).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let mut frame = Vec::new();
+        write_length(&mut frame, dimensions.len())?;
+        for dimension in dimensions {
+            write_string(
+                &mut frame,
+                dimension
+                    .start_cell()
+                    .map(|cell| cell.to_string())
+                    .unwrap_or_default(),
+            )?;
+            write_string(
+                &mut frame,
+                dimension
+                    .end_cell()
+                    .map(|cell| cell.to_string())
+                    .unwrap_or_default(),
+            )?;
+        }
+
+        let handle = Box::new(BufferHandle { frame });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Returns worksheet metadata in workbook order.
+///
+/// # Safety
+///
+/// `path` and all output pointers must be non-null and valid for the duration of the call.
+/// Returned data remains valid until the buffer handle is closed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_get_sheet_info(
+    path: *const c_char,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || out_handle.is_null() || out_data.is_null() || out_length.is_null() {
+            set_last_error("path, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+
+        let path = unsafe { read_utf8(path) }?;
+        let sheets = MiniExcel::get_sheet_info(path).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_QUERY
+        })?;
+        let mut frame = Vec::new();
+        write_length(&mut frame, sheets.len())?;
+        for sheet in sheets {
+            write_u32(&mut frame, sheet.id());
+            write_length(&mut frame, sheet.index())?;
+            write_string(&mut frame, sheet.name())?;
+            frame.push(match sheet.sheet_type() {
+                SheetType::Worksheet => 0,
+                SheetType::DialogSheet => 1,
+                SheetType::MacroSheet => 2,
+                SheetType::ChartSheet => 3,
+                SheetType::Vba => 4,
+            });
+            frame.push(match sheet.visibility() {
+                SheetVisibility::Visible => 0,
+                SheetVisibility::Hidden => 1,
+                SheetVisibility::VeryHidden => 2,
+            });
+            frame.push(u8::from(sheet.is_active()));
+        }
+
+        let handle = Box::new(BufferHandle { frame });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Releases a buffer returned by a metadata operation.
+///
+/// # Safety
+///
+/// `handle` must be null or a handle returned by this library that has not already been closed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_buffer_close(handle: *mut BufferHandle) {
+    if !handle.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(handle) })));
+    }
+}
+
 /// Returns the last error recorded on the current native thread.
 ///
 /// # Safety
@@ -180,6 +650,84 @@ unsafe fn read_utf8<'a>(value: *const c_char) -> Result<&'a str, i32> {
         set_last_error(error.to_string());
         ERROR_INVALID_ARGUMENT
     })
+}
+
+unsafe fn open_query(
+    arguments: QueryOpenOptions,
+    out_handle: *mut *mut QueryHandle,
+) -> Result<i32, i32> {
+    let QueryOpenOptions {
+        path,
+        use_header_row,
+        sheet_name,
+        start_cell,
+        end_cell,
+        ignore_empty_rows,
+        fill_merged_cells,
+        trim_headers,
+        enable_shared_string_cache,
+        shared_string_cache_size,
+        shared_string_cache_path,
+    } = arguments;
+    if path.is_null() || start_cell.is_null() || out_handle.is_null() {
+        set_last_error("path, start_cell, and out_handle are required");
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+
+    unsafe { ptr::write(out_handle, ptr::null_mut()) };
+    let path = unsafe { read_utf8(path) }?;
+    let start_cell = unsafe { read_utf8(start_cell) }?;
+    let start_cell = CellReference::from_str(start_cell).map_err(|error| {
+        set_last_error(error.to_string());
+        ERROR_INVALID_ARGUMENT
+    })?;
+
+    let mut options = ReadOptions::new()
+        .with_header_mode(if use_header_row == 0 {
+            HeaderMode::None
+        } else {
+            HeaderMode::FirstRow
+        })
+        .with_start_cell(start_cell)
+        .with_ignore_empty_rows(ignore_empty_rows != 0)
+        .with_fill_merged_cells(fill_merged_cells != 0)
+        .with_trim_headers(trim_headers != 0)
+        .with_shared_string_disk_cache(enable_shared_string_cache != 0)
+        .with_shared_string_cache_size(shared_string_cache_size);
+
+    if !end_cell.is_null() {
+        let end_cell = unsafe { read_utf8(end_cell) }?;
+        let end_cell = CellReference::from_str(end_cell).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_INVALID_ARGUMENT
+        })?;
+        options = options.with_end_cell(end_cell);
+    }
+
+    if !sheet_name.is_null() {
+        let sheet_name = unsafe { read_utf8(sheet_name) }?;
+        if !sheet_name.is_empty() {
+            options = options.with_sheet_name(sheet_name);
+        }
+    }
+
+    if !shared_string_cache_path.is_null() {
+        let cache_path = unsafe { read_utf8(shared_string_cache_path) }?;
+        if !cache_path.is_empty() {
+            options = options.with_shared_string_cache_path(cache_path);
+        }
+    }
+
+    let rows = MiniExcel::query_with_options(path, &options).map_err(|error| {
+        set_last_error(error.to_string());
+        ERROR_QUERY
+    })?;
+    let handle = Box::new(QueryHandle {
+        rows,
+        frame: Vec::new(),
+    });
+    unsafe { ptr::write(out_handle, Box::into_raw(handle)) };
+    Ok(RESULT_BATCH)
 }
 
 fn set_last_error(message: impl AsRef<str>) {
@@ -244,6 +792,51 @@ fn write_string(frame: &mut Vec<u8>, value: impl AsRef<str>) -> Result<(), i32> 
     Ok(())
 }
 
+fn write_strings(values: Vec<String>) -> Result<Vec<u8>, i32> {
+    let mut frame = Vec::new();
+    write_length(&mut frame, values.len())?;
+    for value in values {
+        write_string(&mut frame, value)?;
+    }
+    Ok(frame)
+}
+
+fn csv_read_options(
+    use_header_row: u8,
+    delimiter: u8,
+    encoding: u8,
+    read_empty_as_null: u8,
+    trim_headers: u8,
+) -> Result<CsvReadOptions, i32> {
+    if delimiter == 0 {
+        set_last_error("delimiter must be a single-byte character");
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let encoding = match encoding {
+        0 => CsvEncoding::Utf8,
+        1 => CsvEncoding::Utf16Le,
+        2 => CsvEncoding::Utf16Be,
+        3 => CsvEncoding::Gbk,
+        4 => CsvEncoding::Windows1252,
+        _ => {
+            set_last_error("encoding is not supported");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+    };
+    let configuration = CsvConfiguration::new()
+        .with_delimiter(delimiter)
+        .with_encoding(encoding)
+        .with_read_empty_as_null(read_empty_as_null != 0);
+    Ok(CsvReadOptions::new()
+        .with_configuration(configuration)
+        .with_header_mode(if use_header_row == 0 {
+            HeaderMode::None
+        } else {
+            HeaderMode::FirstRow
+        })
+        .with_trim_headers(trim_headers != 0))
+}
+
 fn write_length(frame: &mut Vec<u8>, length: usize) -> Result<(), i32> {
     let length = u32::try_from(length).map_err(|_| {
         set_last_error("FFI frame value exceeds the 4 GiB format limit");
@@ -278,5 +871,27 @@ mod tests {
         let error = unsafe { miniexcel_last_error(&mut length) };
         let message = unsafe { std::slice::from_raw_parts(error, length) };
         assert_eq!(message, b"path, start_cell, and out_handle are required");
+    }
+
+    #[test]
+    fn rejects_missing_required_sheet_name_arguments() {
+        let result = unsafe {
+            miniexcel_get_sheet_names(
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+
+        assert_eq!(result, ERROR_INVALID_ARGUMENT);
+
+        let mut length = 0;
+        let error = unsafe { miniexcel_last_error(&mut length) };
+        let message = unsafe { std::slice::from_raw_parts(error, length) };
+        assert_eq!(
+            message,
+            b"path, out_handle, out_data, and out_length are required"
+        );
     }
 }

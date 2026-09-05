@@ -1,0 +1,19 @@
+namespace MiniExcelLibs;
+
+/// <summary>
+/// Configures Rust-backed XLSX queries.
+/// </summary>
+public sealed class MiniExcelRustReadOptions
+{
+    public bool IgnoreEmptyRows { get; set; }
+
+    public bool FillMergedCells { get; set; }
+
+    public bool TrimColumnNames { get; set; } = true;
+
+    public bool EnableSharedStringCache { get; set; } = true;
+
+    public ulong SharedStringCacheSize { get; set; } = 5 * 1024 * 1024;
+
+    public string? SharedStringCachePath { get; set; } = Path.GetTempPath();
+}

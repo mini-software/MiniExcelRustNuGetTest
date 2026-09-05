@@ -4,8 +4,9 @@
 [MiniExcel for Rust](https://github.com/mini-software/MiniExcel-Rust) through a small,
 versioned C ABI.
 
-> This repository and package are experimental. The initial API supports synchronous,
-> path-based dynamic XLSX queries.
+> This repository and package are experimental. The current API supports Rust-backed dynamic
+> XLSX and CSV reads, including path and stream inputs, bounded ranges, named tables, workbook
+> metadata, and managed `DataTable`/`IDataReader` adapters.
 
 ## Install
 
@@ -53,6 +54,27 @@ Rows are streamed in bounded batches across the native boundary. Disposing the e
 early closes the native query handle. Normal `foreach` enumeration disposes it automatically;
 code that manually obtains an enumerator should wrap it in `using`.
 
+Additional read APIs include:
+
+```csharp
+var names = MiniExcelRust.GetSheetNames("input.xlsx");
+var dimensions = MiniExcelRust.GetSheetDimensions("input.xlsx");
+var tableRows = MiniExcelRust.QueryTable("input.xlsx", "Data", "Table1");
+var rangeRows = MiniExcelRust.QueryRange("input.xlsx", true, "Data", "C2", "F100");
+var dataTable = MiniExcelRust.QueryAsDataTable("input.xlsx", hasHeaderRow: true);
+
+var csvRows = MiniExcelRust.QueryCsv(
+    "input.csv",
+    useHeaderRow: true,
+    new MiniExcelRustCsvReadOptions { Delimiter = ';' });
+```
+
+Stream overloads stage input to a temporary file so the Rust engine can retain its bounded-memory
+path iterator. They honor `leaveOpen` and remove the temporary file on completion, failure, or
+early enumeration disposal. Native stream callbacks are planned to remove this staging step.
+
+See [the live parity matrix](docs/parity-matrix.md) for verified APIs and known gaps.
+
 ## Supported Platforms
 
 | .NET RID | Operating system | Architecture | C library |
@@ -83,11 +105,18 @@ dotnet build ./src/MiniExcelRust/MiniExcelRust.csproj -c Release
 ./build/Test-Package.ps1 -Rid win-x64
 ```
 
+Use the local MiniExcel checkout as the read-only behavior oracle instead of the published package:
+
+```powershell
+./build/Test-Package.ps1 -Rid win-x64 -MiniExcelSourceRoot D:\git\MiniExcel
+```
+
 `Test-Package.ps1` builds the native library, packs `MiniExcelRust`, restores a separate
 consumer from the local package feed, and verifies equivalent queries against MiniExcel.
 
-GitHub CI runs those header, headerless, sheet, start-cell, Unicode, boolean, null, numeric,
-full-enumeration, and early-disposal queries on all eight supported RIDs. Each platform also
+GitHub CI runs header, headerless, sheet, range, named-table, metadata, stream, CSV, Unicode,
+boolean, null, numeric, full-enumeration, and early-disposal queries on all eight supported RIDs.
+Each platform also
 runs 5,000 lifecycle iterations and fails when private memory grows by more than 32 MB, when
 the native handle/file-descriptor count grows by more than four, or when the workbook cannot
 be reopened exclusively. This is a bounded resource-growth regression test rather than a

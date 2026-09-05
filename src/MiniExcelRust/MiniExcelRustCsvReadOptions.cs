@@ -1,0 +1,24 @@
+namespace MiniExcelLibs;
+
+public enum MiniExcelRustCsvEncoding : byte
+{
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    Gbk,
+    Windows1252
+}
+
+/// <summary>
+/// Configures Rust-backed CSV queries.
+/// </summary>
+public sealed class MiniExcelRustCsvReadOptions
+{
+    public char Delimiter { get; set; } = ',';
+
+    public MiniExcelRustCsvEncoding Encoding { get; set; } = MiniExcelRustCsvEncoding.Utf8;
+
+    public bool ReadEmptyStringAsNull { get; set; }
+
+    public bool TrimColumnNames { get; set; }
+}
