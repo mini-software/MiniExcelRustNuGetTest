@@ -74,7 +74,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.rid == 'linux-musl-x64' && 'x86_64-unknown-linux-musl' || 'aarch64-unknown-linux-musl' }}
       - uses: actions/setup-dotnet@v4

@@ -49,40 +49,49 @@ jobs:
           - runner: windows-latest
             rid: win-x64
             target: x86_64-pc-windows-msvc
+            rust: 1.85.0
             zig: false
           - runner: windows-11-arm
             rid: win-arm64
             target: aarch64-pc-windows-msvc
+            rust: 1.85.0
             zig: false
           - runner: ubuntu-latest
             rid: linux-x64
             target: x86_64-unknown-linux-gnu
+            rust: 1.85.0
             zig: false
           - runner: ubuntu-24.04-arm
             rid: linux-arm64
             target: aarch64-unknown-linux-gnu
+            rust: 1.85.0
             zig: false
           - runner: ubuntu-latest
             rid: linux-musl-x64
             target: x86_64-unknown-linux-musl
+            rust: 1.97.1
             zig: true
           - runner: ubuntu-24.04-arm
             rid: linux-musl-arm64
             target: aarch64-unknown-linux-musl
+            rust: 1.97.1
             zig: true
           - runner: macos-15-intel
             rid: osx-x64
             target: x86_64-apple-darwin
+            rust: 1.85.0
             zig: false
           - runner: macos-latest
             rid: osx-arm64
             target: aarch64-apple-darwin
+            rust: 1.85.0
             zig: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.rust }}
           targets: ${{ matrix.target }}
       - uses: mlugg/setup-zig@v2
         if: matrix.zig

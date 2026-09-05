@@ -47,6 +47,10 @@ library under `runtimes/{rid}/native/`. .NET selects the matching asset at publi
 
 Rust 1.85 and .NET SDK 8 or later are required.
 
+Rust 1.85 is the source MSRV and builds the Windows, GNU Linux, and macOS libraries. The
+official Rust 1.85 musl targets cannot emit `cdylib` artifacts, so release automation pins
+Rust 1.97.1 for the two musl libraries.
+
 ```powershell
 cargo test --workspace --all-targets --locked
 dotnet build ./src/MiniExcelRust/MiniExcelRust.csproj -c Release
