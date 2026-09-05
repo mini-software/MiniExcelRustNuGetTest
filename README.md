@@ -13,6 +13,19 @@ versioned C ABI.
 dotnet add package MiniExcelRust --prerelease
 ```
 
+The package is currently prerelease. Pin an exact version in production builds:
+
+```shell
+dotnet add package MiniExcelRust --version 0.1.0-preview.2
+```
+
+To check for and install a newer preview:
+
+```shell
+dotnet list package --outdated --include-prerelease
+dotnet add package MiniExcelRust --prerelease
+```
+
 ## Usage
 
 ```csharp
@@ -24,8 +37,21 @@ foreach (var row in MiniExcelRust.Query("input.xlsx", useHeaderRow: true))
 }
 ```
 
+`Query` accepts `path`, `useHeaderRow`, `sheetName`, and `startCell`. Each streamed row is
+an `IDictionary<string, object?>`; cells are returned as strings, doubles, booleans, or nulls.
+For example, a query against another sheet starting at `C2` is:
+
+```csharp
+var rows = MiniExcelRust.Query(
+    "input.xlsx",
+    useHeaderRow: true,
+    sheetName: "Data",
+    startCell: "C2");
+```
+
 Rows are streamed in bounded batches across the native boundary. Disposing the enumerator
-early closes the native query handle.
+early closes the native query handle. Normal `foreach` enumeration disposes it automatically;
+code that manually obtains an enumerator should wrap it in `using`.
 
 ## Supported Platforms
 
@@ -58,11 +84,43 @@ dotnet build ./src/MiniExcelRust/MiniExcelRust.csproj -c Release
 ```
 
 `Test-Package.ps1` builds the native library, packs `MiniExcelRust`, restores a separate
-consumer from the local package feed, and executes an XLSX query smoke test.
+consumer from the local package feed, and verifies equivalent queries against MiniExcel.
+
+GitHub CI runs those header, headerless, sheet, start-cell, Unicode, boolean, null, numeric,
+full-enumeration, and early-disposal queries on all eight supported RIDs. Each platform also
+runs 5,000 lifecycle iterations and fails when private memory grows by more than 32 MB, when
+the native handle/file-descriptor count grows by more than four, or when the workbook cannot
+be reopened exclusively. This is a bounded resource-growth regression test rather than a
+mathematical proof that no leak can exist.
+
+## Benchmark
+
+The benchmark first compares every returned row and cell with the configured MiniExcel NuGet
+baseline. It then measures both implementations in alternating fresh processes against the
+same generated XLSX file and query options. The scheduled and manually dispatched GitHub
+workflow runs on Windows, Linux, and macOS for x64 and Arm64; musl remains covered by the
+Alpine correctness and lifecycle job because GitHub does not provide native musl runners.
+
+The latest checked-in cross-platform summary and per-RID reports are in the
+[benchmark results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md).
+Each report includes elapsed time, first-row latency, managed allocation, peak process memory,
+environment metadata, and a JSON file containing all raw iterations and hashes.
+
+After all scheduled benchmarks pass on the default branch, the workflow updates
+`docs/benchmarks/` through an `automation/benchmark-results` pull request. Repeated runs refresh
+the same PR instead of committing directly to the protected branch. Repository settings must
+allow GitHub Actions to create pull requests.
+
+Run the same reproducible comparison locally, or override `-MiniExcelVersion` to test a newer
+NuGet release:
+
+```powershell
+./build/Benchmark-Package.ps1 -Rid win-x64 -MiniExcelVersion 2.0.0-preview.4
+```
 
 ## Release
 
-Version tags use the form `v0.1.0-preview.1`. The release workflow builds all eight native
+Version tags use the form `v0.1.0-preview.2`. The release workflow builds all eight native
 assets, verifies the assembled package, tests it on native GitHub-hosted runners, and publishes
 to NuGet.org through the protected `release` environment.
 

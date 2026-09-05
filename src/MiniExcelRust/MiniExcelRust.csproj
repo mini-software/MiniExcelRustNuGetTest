@@ -8,15 +8,15 @@
     <RootNamespace>MiniExcelLibs</RootNamespace>
     <AssemblyName>MiniExcelRust</AssemblyName>
     <PackageId>MiniExcelRust</PackageId>
-    <Version>0.1.0-preview.1</Version>
+    <Version>0.1.0-preview.2</Version>
     <Title>MiniExcelRust</Title>
     <Description>Low-memory, high-performance XLSX queries for .NET powered by MiniExcel for Rust.</Description>
     <Authors>Mini-Software</Authors>
     <Company>Mini-Software</Company>
     <PackageTags>excel;xlsx;rust;native;streaming</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/mini-software/MiniExcelRust</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/mini-software/MiniExcelRust</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/mini-software/MiniExcelRustNuGetTest</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mini-software/MiniExcelRustNuGetTest</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>

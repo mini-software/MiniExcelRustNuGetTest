@@ -5,10 +5,13 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <MiniExcelRustPackageVersion Condition="'$(MiniExcelRustPackageVersion)' == ''">0.1.0-preview.1</MiniExcelRustPackageVersion>
+    <MiniExcelRustPackageVersion Condition="'$(MiniExcelRustPackageVersion)' == ''">0.1.0-preview.2</MiniExcelRustPackageVersion>
+    <MiniExcelVersion>2.0.0-preview.4</MiniExcelVersion>
+    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="MiniExcel" Version="$(MiniExcelVersion)" />
     <PackageReference Include="MiniExcelRust" Version="$(MiniExcelRustPackageVersion)" />
   </ItemGroup>
 

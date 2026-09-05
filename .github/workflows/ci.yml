@@ -61,7 +61,7 @@ jobs:
           key: ${{ matrix.rid }}
       - name: Build, pack, and test
         shell: pwsh
-        run: ./build/Test-Package.ps1 -Rid '${{ matrix.rid }}'
+        run: ./build/Test-Package.ps1 -Rid '${{ matrix.rid }}' -LifecycleIterations 5000
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.rid }}
@@ -106,7 +106,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             mcr.microsoft.com/dotnet/sdk:8.0-alpine \
-            sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore'
+            sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -- suite 5000 32'
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.rid }}
@@ -130,9 +130,9 @@ jobs:
         run: dotnet pack src/MiniExcelRust/MiniExcelRust.csproj -c Release -o artifacts/packages
       - name: Verify package contents
         shell: pwsh
-        run: ./build/Verify-Package.ps1 -PackagePath artifacts/packages/MiniExcelRust.0.1.0-preview.1.nupkg
+        run: ./build/Verify-Package.ps1 -PackagePath artifacts/packages/MiniExcelRust.0.1.0-preview.2.nupkg
       - uses: actions/upload-artifact@v4
         with:
           name: nuget-preview
-          path: artifacts/packages/MiniExcelRust.0.1.0-preview.1.*nupkg
+          path: artifacts/packages/MiniExcelRust.0.1.0-preview.2.*nupkg
           if-no-files-found: error

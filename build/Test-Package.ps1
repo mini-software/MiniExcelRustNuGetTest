@@ -3,9 +3,17 @@ param(
     [ValidateSet('win-x64', 'win-arm64', 'linux-x64', 'linux-arm64', 'linux-musl-x64', 'linux-musl-arm64', 'osx-x64', 'osx-arm64')]
     [string] $Rid = 'win-x64',
 
-    [string] $Version = '0.1.0-preview.1',
+    [string] $Version = '0.1.0-preview.2',
 
-    [switch] $SkipNativeBuild
+    [string] $MiniExcelVersion = '2.0.0-preview.4',
+
+    [switch] $SkipNativeBuild,
+
+    [ValidateRange(100, 1000000)]
+    [int] $LifecycleIterations = 1000,
+
+    [ValidateRange(1, 1024)]
+    [int] $MaxPrivateGrowthMb = 32
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,13 +51,16 @@ finally {
 & dotnet restore $consumerProject `
     --force `
     --source $packageDirectory `
-    -p:MiniExcelRustPackageVersion=$Version
+    -p:MiniExcelRustPackageVersion=$Version `
+    -p:MiniExcelVersion=$MiniExcelVersion
 if ($LASTEXITCODE -ne 0) {
     throw 'Package consumer restore failed.'
 }
 
 & dotnet run --project $consumerProject -c Release --no-restore `
-    -p:MiniExcelRustPackageVersion=$Version
+    -p:MiniExcelRustPackageVersion=$Version `
+    -p:MiniExcelVersion=$MiniExcelVersion `
+    -- suite $LifecycleIterations $MaxPrivateGrowthMb
 if ($LASTEXITCODE -ne 0) {
     throw 'Package consumer smoke test failed.'
 }

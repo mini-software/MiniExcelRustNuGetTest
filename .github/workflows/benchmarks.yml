@@ -1,0 +1,115 @@
+name: Cross-platform benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Workbook row count
+        required: true
+        default: 100000
+        type: number
+      columns:
+        description: Workbook column count
+        required: true
+        default: 10
+        type: number
+      iterations:
+        description: Fresh processes per runtime and scenario
+        required: true
+        default: 5
+        type: number
+      mini_excel_version:
+        description: MiniExcel NuGet baseline version
+        required: true
+        default: 2.0.0-preview.4
+        type: string
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Benchmark ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+          - runner: windows-11-arm
+            rid: win-arm64
+          - runner: ubuntu-latest
+            rid: linux-x64
+          - runner: ubuntu-24.04-arm
+            rid: linux-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+          - runner: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      BENCHMARK_ROWS: ${{ inputs.rows || '100000' }}
+      BENCHMARK_COLUMNS: ${{ inputs.columns || '10' }}
+      BENCHMARK_ITERATIONS: ${{ inputs.iterations || '5' }}
+      MINIEXCEL_VERSION: ${{ inputs.mini_excel_version || '2.0.0-preview.4' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark-${{ matrix.rid }}
+      - name: Run equivalent-query benchmark
+        shell: pwsh
+        run: |
+          ./build/Benchmark-Package.ps1 `
+            -Rid '${{ matrix.rid }}' `
+            -Rows $env:BENCHMARK_ROWS `
+            -Columns $env:BENCHMARK_COLUMNS `
+            -Iterations $env:BENCHMARK_ITERATIONS `
+            -MiniExcelVersion $env:MINIEXCEL_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.rid }}
+          path: |
+            artifacts/benchmarks/benchmark-${{ matrix.rid }}.json
+            artifacts/benchmarks/benchmark-${{ matrix.rid }}.md
+          if-no-files-found: error
+
+  publish-results:
+    name: Open benchmark results PR
+    needs: benchmark
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-*
+          path: artifacts/benchmarks
+          merge-multiple: true
+      - name: Publish benchmark reports
+        shell: pwsh
+        run: ./build/Publish-Benchmark-Results.ps1
+      - name: Create or update results pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/benchmark-results
+          base: ${{ github.event.repository.default_branch }}
+          delete-branch: true
+          commit-message: 'docs: update cross-platform benchmark results'
+          title: 'docs: update cross-platform benchmark results'
+          body: |
+            Automated benchmark refresh from `${{ github.workflow }}`.
+
+            Source run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          add-paths: docs/benchmarks
