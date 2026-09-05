@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: NuGet version, for example 0.1.0-preview.1
+        description: NuGet version, for example 0.1.0-preview.2
         required: true
-        default: 0.1.0-preview.1
+        default: 0.1.0-preview.2
         type: string
       publish:
         description: Publish to NuGet.org after all tests pass
@@ -188,7 +188,7 @@ jobs:
         shell: pwsh
         run: |
           dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }}
-          dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }}
+          dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }} -- suite 5000 32
       - name: Consume package in Alpine
         if: matrix.musl
         shell: bash
@@ -197,7 +197,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             mcr.microsoft.com/dotnet/sdk:8.0-alpine \
-            sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }} && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }}'
+            sh -lc 'dotnet restore tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj --source artifacts/packages -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }} && dotnet run --project tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj -c Release --no-restore -p:MiniExcelRustPackageVersion=${{ needs.prepare.outputs.version }} -- suite 5000 32'
 
   publish:
     needs: [prepare, test-package]

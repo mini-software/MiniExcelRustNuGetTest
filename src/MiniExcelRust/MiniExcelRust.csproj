@@ -8,7 +8,7 @@
     <RootNamespace>MiniExcelLibs</RootNamespace>
     <AssemblyName>MiniExcelRust</AssemblyName>
     <PackageId>MiniExcelRust</PackageId>
-    <Version>0.1.0-preview.1</Version>
+    <Version>0.1.0-preview.2</Version>
     <Title>MiniExcelRust</Title>
     <Description>Low-memory, high-performance XLSX queries for .NET powered by MiniExcel for Rust.</Description>
     <Authors>Mini-Software</Authors>
