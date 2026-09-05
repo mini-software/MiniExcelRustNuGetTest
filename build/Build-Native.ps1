@@ -33,6 +33,7 @@ $targets = @{
 }
 
 $target = $targets[$Rid]
+$originalRustFlags = $env:RUSTFLAGS
 Push-Location $repositoryRoot
 try {
     if (-not [string]::IsNullOrWhiteSpace($Toolchain)) {
@@ -55,6 +56,10 @@ try {
         $target.Triple
     )
 
+    if ($UseZig) {
+        $env:RUSTFLAGS = "$originalRustFlags -C target-feature=-crt-static".Trim()
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($Toolchain)) {
         & rustup run $Toolchain cargo @buildArguments
     }
@@ -71,5 +76,6 @@ try {
     Copy-Item $source (Join-Path $destinationDirectory $target.File) -Force
 }
 finally {
+    $env:RUSTFLAGS = $originalRustFlags
     Pop-Location
 }

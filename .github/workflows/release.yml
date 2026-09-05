@@ -69,12 +69,12 @@ jobs:
           - runner: ubuntu-latest
             rid: linux-musl-x64
             target: x86_64-unknown-linux-musl
-            rust: 1.97.1
+            rust: 1.85.0
             zig: true
           - runner: ubuntu-24.04-arm
             rid: linux-musl-arm64
             target: aarch64-unknown-linux-musl
-            rust: 1.97.1
+            rust: 1.85.0
             zig: true
           - runner: macos-15-intel
             rid: osx-x64
