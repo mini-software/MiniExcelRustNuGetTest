@@ -6,8 +6,8 @@ use std::str::FromStr;
 
 use miniexcel::{
     CellReference, CellValue, CommentPerson, CommentTimestamp, CsvConfiguration, CsvEncoding,
-    CsvReadOptions, CsvWriteOptions, DynamicRow, HeaderMode, MiniExcel, ReadOptions, SheetType,
-    SheetVisibility, WriteOptions,
+    CsvReadOptions, CsvWriteOptions, DynamicRow, ExistingSheetPolicy, HeaderMode, InsertOptions,
+    MiniExcel, ReadOptions, SheetType, SheetVisibility, TargetRelationshipPolicy, WriteOptions,
 };
 
 const ABI_VERSION: u32 = 1;
@@ -809,6 +809,97 @@ pub unsafe extern "C" fn miniexcel_append_csv(
     })
 }
 
+/// Inserts or replaces a worksheet in an XLSX workbook.
+///
+/// # Safety
+///
+/// `path`, `data`, `sheet_name`, and `out_row_count` must be valid for the supplied lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_insert_sheet(
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    sheet_name: *const c_char,
+    print_header: u8,
+    replace_existing: u8,
+    remove_supported_relationships: u8,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || data.is_null() || sheet_name.is_null() || out_row_count.is_null() {
+            set_last_error("path, data, sheet_name, and out_row_count are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe { ptr::write(out_row_count, 0) };
+        let path = unsafe { read_utf8(path) }?;
+        let sheet_name = unsafe { read_utf8(sheet_name) }?;
+        let rows = decode_rows(unsafe { std::slice::from_raw_parts(data, data_length) })?;
+        let options = insert_options(
+            sheet_name,
+            print_header,
+            replace_existing,
+            remove_supported_relationships,
+            false,
+        );
+        let count = MiniExcel::insert(path, &rows, &options).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        write_row_count(count, out_row_count)
+    })
+}
+
+/// Copies an XLSX workbook and adds or replaces one worksheet in the destination.
+///
+/// # Safety
+///
+/// Both paths, `data`, `sheet_name`, and `out_row_count` must be valid for supplied lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_copy_and_add_sheet(
+    source_path: *const c_char,
+    destination_path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    sheet_name: *const c_char,
+    print_header: u8,
+    replace_existing: u8,
+    remove_supported_relationships: u8,
+    overwrite_destination: u8,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| {
+        if source_path.is_null()
+            || destination_path.is_null()
+            || data.is_null()
+            || sheet_name.is_null()
+            || out_row_count.is_null()
+        {
+            set_last_error(
+                "source_path, destination_path, data, sheet_name, and out_row_count are required",
+            );
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe { ptr::write(out_row_count, 0) };
+        let source_path = unsafe { read_utf8(source_path) }?;
+        let destination_path = unsafe { read_utf8(destination_path) }?;
+        let sheet_name = unsafe { read_utf8(sheet_name) }?;
+        let rows = decode_rows(unsafe { std::slice::from_raw_parts(data, data_length) })?;
+        let options = insert_options(
+            sheet_name,
+            print_header,
+            replace_existing,
+            remove_supported_relationships,
+            overwrite_destination != 0,
+        );
+        let count = MiniExcel::copy_and_add_sheet(source_path, destination_path, &rows, &options)
+            .map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        write_row_count(count, out_row_count)
+    })
+}
+
 /// Atomically renames a worksheet in an existing XLSX workbook.
 ///
 /// # Safety
@@ -1237,6 +1328,38 @@ fn decode_rows(bytes: &[u8]) -> Result<Vec<DynamicRow>, i32> {
     }
     reader.ensure_complete()?;
     Ok(rows)
+}
+
+fn insert_options(
+    sheet_name: &str,
+    print_header: u8,
+    replace_existing: u8,
+    remove_supported_relationships: u8,
+    overwrite_file: bool,
+) -> InsertOptions {
+    InsertOptions::new()
+        .with_sheet_name(sheet_name)
+        .with_print_header(print_header != 0)
+        .with_existing_sheet_policy(if replace_existing == 0 {
+            ExistingSheetPolicy::Reject
+        } else {
+            ExistingSheetPolicy::Replace
+        })
+        .with_target_relationship_policy(if remove_supported_relationships == 0 {
+            TargetRelationshipPolicy::Reject
+        } else {
+            TargetRelationshipPolicy::RemoveSupported
+        })
+        .with_overwrite_file(overwrite_file)
+}
+
+fn write_row_count(count: usize, out_row_count: *mut u32) -> Result<i32, i32> {
+    let count = u32::try_from(count).map_err(|_| {
+        set_last_error("row count exceeds the ABI limit");
+        ERROR_WRITE
+    })?;
+    unsafe { ptr::write(out_row_count, count) };
+    Ok(RESULT_BATCH)
 }
 
 struct FrameInput<'a> {

@@ -40,7 +40,7 @@ limits; **Missing** has no production implementation yet.
 | XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Basic scalars and overwrite behavior verified; temporal values, schema, styles and multi-sheet remain |
 | XLSX write | Typed/async/multi-sheet export | Missing | Rust core exists; input schema/callback ABI required |
 | Workbook edits | Rename/reorder/visibility | Verified | Atomic path operations checked through C# and Rust metadata readers |
-| Workbook edits | Insert/copy-and-add | Missing | Row/schema ABI and package-preservation tests required |
+| Workbook edits | Dynamic insert/copy-and-add, path | Partial | Add/reject/replace/source preservation verified; stream and complex relationship policies remain |
 | Templates | Fill/merge | Missing | Rust core is partial; formula and relationship parity required |
 | Pictures | AddPicture | Missing | Rust core implementation required |
 | Fluent mapping | Read/write/template | Missing | Managed mapping plan plus Rust execution required |

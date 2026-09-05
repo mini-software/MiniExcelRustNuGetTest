@@ -780,6 +780,86 @@ public static class MiniExcelRust
             throw CreateNativeException(result);
     }
 
+    public static int InsertSheet(
+        string path,
+        IEnumerable<IDictionary<string, object?>> rows,
+        string sheetName,
+        MiniExcelRustInsertOptions? options = null)
+    {
+        ValidatePathAndSheet(path, sheetName);
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        options ??= new MiniExcelRustInsertOptions();
+        EnsureAbiVersion();
+
+        var frame = EncodeRows(rows);
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.InsertSheet(
+                nativePath.Pointer,
+                frameHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)frame.Length,
+                nativeSheetName.Pointer,
+                options.PrintHeader ? (byte)1 : (byte)0,
+                options.ReplaceExistingSheet ? (byte)1 : (byte)0,
+                options.RemoveSupportedRelationships ? (byte)1 : (byte)0,
+                out var rowCount);
+            if (result < 0)
+                throw CreateNativeException(result);
+            return checked((int)rowCount);
+        }
+        finally
+        {
+            frameHandle.Free();
+        }
+    }
+
+    public static int CopyAndAddSheet(
+        string sourcePath,
+        string destinationPath,
+        IEnumerable<IDictionary<string, object?>> rows,
+        string sheetName,
+        MiniExcelRustInsertOptions? options = null)
+    {
+        ValidatePathAndSheet(sourcePath, sheetName);
+        if (string.IsNullOrWhiteSpace(destinationPath))
+            throw new ArgumentException("The destination path is required.", nameof(destinationPath));
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        options ??= new MiniExcelRustInsertOptions();
+        EnsureAbiVersion();
+
+        var frame = EncodeRows(rows);
+        using var nativeSourcePath = new Utf8String(Path.GetFullPath(sourcePath));
+        using var nativeDestinationPath = new Utf8String(Path.GetFullPath(destinationPath));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.CopyAndAddSheet(
+                nativeSourcePath.Pointer,
+                nativeDestinationPath.Pointer,
+                frameHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)frame.Length,
+                nativeSheetName.Pointer,
+                options.PrintHeader ? (byte)1 : (byte)0,
+                options.ReplaceExistingSheet ? (byte)1 : (byte)0,
+                options.RemoveSupportedRelationships ? (byte)1 : (byte)0,
+                options.OverwriteDestination ? (byte)1 : (byte)0,
+                out var rowCount);
+            if (result < 0)
+                throw CreateNativeException(result);
+            return checked((int)rowCount);
+        }
+        finally
+        {
+            frameHandle.Free();
+        }
+    }
+
     private static IEnumerable<IDictionary<string, object?>> QueryStreamIterator(
         Stream stream,
         bool useHeaderRow,
@@ -1618,6 +1698,30 @@ public static class MiniExcelRust
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_set_sheet_visibility", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern int SetSheetVisibility(IntPtr path, IntPtr sheetName, byte visibility);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_insert_sheet", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int InsertSheet(
+            IntPtr path,
+            IntPtr data,
+            UIntPtr dataLength,
+            IntPtr sheetName,
+            byte printHeader,
+            byte replaceExisting,
+            byte removeSupportedRelationships,
+            out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_copy_and_add_sheet", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int CopyAndAddSheet(
+            IntPtr sourcePath,
+            IntPtr destinationPath,
+            IntPtr data,
+            UIntPtr dataLength,
+            IntPtr sheetName,
+            byte printHeader,
+            byte replaceExisting,
+            byte removeSupportedRelationships,
+            byte overwriteDestination,
+            out uint rowCount);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_buffer_close", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void BufferClose(IntPtr handle);

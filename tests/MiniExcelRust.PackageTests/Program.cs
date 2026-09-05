@@ -112,6 +112,7 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifySaveAs();
     VerifyCsvWrite();
     VerifyTypedConversions();
+    VerifyInsertAndCopy();
     VerifyWorkbookMutations(workbookPath);
     VerifyLifecycle(workbookPath, lifecycleIterations, maxPrivateGrowthMb);
     Console.WriteLine("MiniExcelRust parity and lifecycle suite passed.");
@@ -286,6 +287,60 @@ static void VerifyWorkbookMutations(string sourcePath)
   {
     if (File.Exists(path))
       File.Delete(path);
+  }
+}
+
+static void VerifyInsertAndCopy()
+{
+  var insertPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-insert-{Guid.NewGuid():N}.xlsx");
+  var destinationPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-copy-{Guid.NewGuid():N}.xlsx");
+  var rows = new List<IDictionary<string, object?>>
+  {
+    new Dictionary<string, object?> { ["Key"] = "A", ["Amount"] = 10d },
+    new Dictionary<string, object?> { ["Key"] = "B", ["Amount"] = 20d }
+  };
+  try
+  {
+    MiniExcelRust.SaveAs(
+      insertPath,
+      new[] { new Dictionary<string, object?> { ["Seed"] = "value" } },
+      sheetName: "Base");
+    var inserted = MiniExcelRust.InsertSheet(insertPath, rows, "Inserted");
+    Require(inserted == rows.Count, "insert-sheet: row count differs.");
+    CompareRows(rows, MiniExcelRust.Query(insertPath, true, "Inserted").ToList(), "insert-sheet");
+
+    var rejectedDuplicate = false;
+    try
+    {
+      MiniExcelRust.InsertSheet(insertPath, rows, "Inserted");
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedDuplicate = true;
+    }
+    Require(rejectedDuplicate, "insert-sheet: duplicate sheet should be rejected by default.");
+
+    var replaced = MiniExcelRust.InsertSheet(
+      insertPath,
+      rows,
+      "Base",
+      new MiniExcelRustInsertOptions { ReplaceExistingSheet = true });
+    Require(replaced == rows.Count, "insert-sheet: replacement row count differs.");
+    CompareRows(rows, QueryManaged(insertPath, true, "Base").ToList(), "replace-sheet");
+
+    var sourceHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(insertPath)));
+    var copied = MiniExcelRust.CopyAndAddSheet(insertPath, destinationPath, rows, "Copied");
+    Require(copied == rows.Count, "copy-add-sheet: row count differs.");
+    CompareRows(rows, QueryManaged(destinationPath, true, "Copied").ToList(), "copy-add-sheet");
+    var sourceHashAfter = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(insertPath)));
+    Require(sourceHash == sourceHashAfter, "copy-add-sheet: source workbook changed.");
+  }
+  finally
+  {
+    if (File.Exists(insertPath))
+      File.Delete(insertPath);
+    if (File.Exists(destinationPath))
+      File.Delete(destinationPath);
   }
 }
 
