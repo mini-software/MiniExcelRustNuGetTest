@@ -206,22 +206,19 @@ jobs:
     environment: release
     permissions:
       contents: write
-    env:
-      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: nuget-package
           path: artifacts/packages
-      - name: Require NuGet API key
-        shell: bash
-        run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "::error::Add NUGET_API_KEY to the protected release environment."
-            exit 1
-          fi
+      - name: NuGet login
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: minisoftware
       - name: Publish NuGet package
-        run: dotnet nuget push artifacts/packages/MiniExcelRust.${{ needs.prepare.outputs.version }}.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push artifacts/packages/MiniExcelRust.${{ needs.prepare.outputs.version }}.nupkg --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
       - name: Create GitHub release
         if: github.event_name == 'push'
         env:
