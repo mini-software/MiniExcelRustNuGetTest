@@ -7,7 +7,8 @@ use std::str::FromStr;
 use miniexcel::{
     CellReference, CellValue, CommentPerson, CommentTimestamp, CsvConfiguration, CsvEncoding,
     CsvReadOptions, CsvWriteOptions, DynamicRow, ExistingSheetPolicy, HeaderMode, InsertOptions,
-    MiniExcel, ReadOptions, SheetType, SheetVisibility, TargetRelationshipPolicy, WriteOptions,
+    MergeSameCellsOptions, MiniExcel, ReadOptions, SheetType, SheetVisibility,
+    TargetRelationshipPolicy, TemplateOptions, WriteOptions,
 };
 
 const ABI_VERSION: u32 = 1;
@@ -897,6 +898,73 @@ pub unsafe extern "C" fn miniexcel_copy_and_add_sheet(
             ERROR_WRITE
         })?;
         write_row_count(count, out_row_count)
+    })
+}
+
+/// Fills an XLSX template from a UTF-8 JSON value and atomically writes the destination.
+///
+/// # Safety
+///
+/// All string pointers must be non-null, valid, null-terminated UTF-8 for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_fill_template(
+    destination_path: *const c_char,
+    template_path: *const c_char,
+    json_data: *const u8,
+    json_length: usize,
+    overwrite_file: u8,
+    ignore_missing_variables: u8,
+) -> i32 {
+    ffi_result(|| {
+        if destination_path.is_null() || template_path.is_null() || json_data.is_null() {
+            set_last_error("destination_path, template_path, and json_data are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+
+        let destination_path = unsafe { read_utf8(destination_path) }?;
+        let template_path = unsafe { read_utf8(template_path) }?;
+        let json = unsafe { std::slice::from_raw_parts(json_data, json_length) };
+        let value: serde_json::Value = serde_json::from_slice(json).map_err(|error| {
+            set_last_error(format!("invalid template JSON: {error}"));
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let options = TemplateOptions::new()
+            .with_overwrite_file(overwrite_file != 0)
+            .with_ignore_missing_variables(ignore_missing_variables != 0);
+        MiniExcel::save_as_template(destination_path, template_path, &value, &options).map_err(
+            |error| {
+                set_last_error(error.to_string());
+                ERROR_WRITE
+            },
+        )?;
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Merges tagged same-value cells into a separate XLSX destination.
+///
+/// # Safety
+///
+/// Both path pointers must be non-null, valid, null-terminated UTF-8 for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_merge_same_cells(
+    destination_path: *const c_char,
+    source_path: *const c_char,
+    overwrite_file: u8,
+) -> i32 {
+    ffi_result(|| {
+        if destination_path.is_null() || source_path.is_null() {
+            set_last_error("destination_path and source_path are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let destination_path = unsafe { read_utf8(destination_path) }?;
+        let source_path = unsafe { read_utf8(source_path) }?;
+        let options = MergeSameCellsOptions::new().with_overwrite_file(overwrite_file != 0);
+        MiniExcel::merge_same_cells(source_path, destination_path, &options).map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        Ok(RESULT_BATCH)
     })
 }
 

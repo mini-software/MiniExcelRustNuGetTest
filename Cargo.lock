@@ -428,6 +428,7 @@ name = "miniexcel-ffi"
 version = "0.1.0"
 dependencies = [
  "miniexcel",
+ "serde_json",
 ]
 
 [[package]]

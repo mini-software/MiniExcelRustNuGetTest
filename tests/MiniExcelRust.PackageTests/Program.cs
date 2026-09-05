@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using MiniExcelLib;
 using MiniExcelLib.Csv;
 using MiniExcelLib.OpenXml;
@@ -20,12 +21,67 @@ return args[0].ToLowerInvariant() switch
     args.Length >= 2 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 1_000,
     args.Length >= 3 ? int.Parse(args[2], CultureInfo.InvariantCulture) : 32),
   "comments" => VerifyCommentsParity(args),
+  "merge" => VerifyMergeSameCells(args),
   "verify" => VerifyFileParity(args),
   "generate" => GenerateBenchmarkWorkbook(args),
   "managed" => Benchmark(args, useRust: false),
   "rust" => Benchmark(args, useRust: true),
   _ => Usage()
 };
+
+static int VerifyMergeSameCells(string[] arguments)
+{
+  if (arguments.Length != 2)
+    return Usage();
+
+  var sourcePath = Path.GetFullPath(arguments[1]);
+  var destinationPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-merged-{Guid.NewGuid():N}.xlsx");
+  var sourceHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(sourcePath)));
+  try
+  {
+    MiniExcelRust.MergeSameCells(destinationPath, sourcePath);
+    Require(
+      ReadMergeReferences(destinationPath).SequenceEqual(new[] { "A2:A4", "C3:C4", "A7:A8" }, StringComparer.Ordinal),
+      "merge-same-cells: generated ranges differ.");
+    Require(
+      MiniExcelRust.Query(destinationPath).SelectMany(row => row.Values).All(value => value is not "@merge" and not "@endmerge"),
+      "merge-same-cells: marker values remain in output.");
+    var sourceHashAfter = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(sourcePath)));
+    Require(sourceHash == sourceHashAfter, "merge-same-cells: source workbook changed.");
+
+    var rejectedOverwrite = false;
+    try
+    {
+      MiniExcelRust.MergeSameCells(destinationPath, sourcePath);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedOverwrite = true;
+    }
+    Require(rejectedOverwrite, "merge-same-cells: overwrite=false should reject an existing destination.");
+    MiniExcelRust.MergeSameCells(destinationPath, sourcePath, overwriteFile: true);
+    Console.WriteLine("Verified merge-same-cells output and source preservation.");
+    return 0;
+  }
+  finally
+  {
+    if (File.Exists(destinationPath))
+      File.Delete(destinationPath);
+  }
+}
+
+static List<string> ReadMergeReferences(string path)
+{
+  using var archive = ZipFile.OpenRead(path);
+  var entry = archive.GetEntry("xl/worksheets/sheet1.xml")
+    ?? throw new InvalidDataException("The workbook has no first worksheet.");
+  using var stream = entry.Open();
+  var document = XDocument.Load(stream);
+  XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  return document.Descendants(spreadsheet + "mergeCell")
+    .Select(element => (string?)element.Attribute("ref") ?? string.Empty)
+    .ToList();
+}
 
 static int VerifyCommentsParity(string[] arguments)
 {
@@ -113,6 +169,7 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifyCsvWrite();
     VerifyTypedConversions();
     VerifyInsertAndCopy();
+    VerifyTemplateFill();
     VerifyWorkbookMutations(workbookPath);
     VerifyLifecycle(workbookPath, lifecycleIterations, maxPrivateGrowthMb);
     Console.WriteLine("MiniExcelRust parity and lifecycle suite passed.");
@@ -344,6 +401,68 @@ static void VerifyInsertAndCopy()
   }
 }
 
+static void VerifyTemplateFill()
+{
+  var templatePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-{Guid.NewGuid():N}.xlsx");
+  var managedPath = Path.Combine(Path.GetTempPath(), $"miniexcel-managed-template-{Guid.NewGuid():N}.xlsx");
+  var rustPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-output-{Guid.NewGuid():N}.xlsx");
+  var strictPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-strict-{Guid.NewGuid():N}.xlsx");
+  try
+  {
+    MiniExcelRust.SaveAs(
+      templatePath,
+      new[]
+      {
+        new Dictionary<string, object?> { ["A"] = "{{title}}", ["B"] = "{{active}}" },
+        new Dictionary<string, object?> { ["A"] = "{{items.name}}", ["B"] = "{{items.score}}" }
+      },
+      printHeader: false);
+    var value = new
+    {
+      title = "Quarterly <Report>",
+      active = true,
+      items = new[] { new { name = "Ada", score = 10 }, new { name = "Linus", score = 20 } }
+    };
+
+    ManagedMiniExcel.Templaters.GetOpenXmlTemplater().FillTemplate(managedPath, templatePath, value);
+    MiniExcelRust.FillTemplate(rustPath, templatePath, value);
+    CompareRows(
+      QueryManaged(managedPath, false).ToList(),
+      MiniExcelRust.Query(rustPath).ToList(),
+      "template-fill");
+
+    var rejectedOverwrite = false;
+    try
+    {
+      MiniExcelRust.FillTemplate(rustPath, templatePath, value);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedOverwrite = true;
+    }
+    Require(rejectedOverwrite, "template-fill: overwrite=false should reject an existing file.");
+
+    var rejectedMissing = false;
+    try
+    {
+      MiniExcelRust.FillTemplate(strictPath, templatePath, new { title = "Missing items" }, ignoreMissingVariables: false);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedMissing = true;
+    }
+    Require(rejectedMissing, "template-fill: strict missing variables should fail.");
+  }
+  finally
+  {
+    foreach (var path in new[] { templatePath, managedPath, rustPath, strictPath })
+    {
+      if (File.Exists(path))
+        File.Delete(path);
+    }
+  }
+}
+
 static void VerifyCsvParity(string path)
 {
   var managedConfiguration = new CsvConfiguration
@@ -371,6 +490,8 @@ static void VerifyCsvParity(string path)
     Require(managedTypedRows[index].Name == rustTypedRows[index].Name, $"csv-typed: name differs at {index}.");
     Require(managedTypedRows[index].Note == rustTypedRows[index].Note, $"csv-typed: note differs at {index}.");
   }
+  var asyncRows = CollectAsync(MiniExcelRust.QueryCsvAsync(path, true, rustConfiguration)).GetAwaiter().GetResult();
+  CompareRows(managedRows, asyncRows, "csv-async");
 
   var managedColumns = importer.GetColumnNames(path, true, managedConfiguration);
   var rustColumns = MiniExcelRust.GetCsvColumnNames(path, true, rustConfiguration);
@@ -522,6 +643,26 @@ static void VerifyParity(string path)
     typedTableRows.Count == 2 && typedTableRows[0].Code == "x" && typedTableRows[0].Amount == 3.5d,
     "typed-table: values differ.");
 
+  var asyncRows = CollectAsync(MiniExcelRust.QueryAsync(path, true, "Sheet1")).GetAwaiter().GetResult();
+  CompareRows(rows, asyncRows, "async-query");
+  var asyncTypedRows = CollectAsync(MiniExcelRust.QueryAsync<TypedSheetRow>(path, "Sheet1")).GetAwaiter().GetResult();
+  CompareTypedRows(managedTypedRows, asyncTypedRows, "async-typed-query");
+  var asyncTableRows = CollectAsync(MiniExcelRust.QueryTableAsync(path, "Data", "DataTable")).GetAwaiter().GetResult();
+  CompareRows(managedTableRows, asyncTableRows, "async-table-query");
+
+  using var cancellation = new CancellationTokenSource();
+  cancellation.Cancel();
+  var cancelled = false;
+  try
+  {
+    _ = CollectAsync(MiniExcelRust.QueryAsync(path, cancellationToken: cancellation.Token)).GetAwaiter().GetResult();
+  }
+  catch (OperationCanceledException)
+  {
+    cancelled = true;
+  }
+  Require(cancelled, "async-query: a pre-cancelled token should cancel enumeration.");
+
   var managedTable = importer.QueryAsDataTable(path, true, "Sheet1");
   var rustTable = MiniExcelRust.QueryAsDataTable(path, true, "Sheet1");
   CompareDataTables(managedTable, rustTable, "data-table");
@@ -561,6 +702,14 @@ static void CompareTypedRows(
     Require(Equals(expected[index].Value, actual[index].Value), $"{scenario}: value differs at {index}.");
     Require(expected[index].Note == actual[index].Note, $"{scenario}: note differs at {index}.");
   }
+}
+
+static async Task<List<T>> CollectAsync<T>(IAsyncEnumerable<T> values)
+{
+  var result = new List<T>();
+  await foreach (var value in values)
+    result.Add(value);
+  return result;
 }
 
 static void VerifyStreamParity(string path)
@@ -1045,6 +1194,7 @@ static void AddEntry(ZipArchive archive, string name, string contents)
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  PublicNuGetSmoke suite [lifecycle-iterations] [max-private-growth-mb]");
     Console.Error.WriteLine("  PublicNuGetSmoke comments <xlsx-path> [sheet-name]");
+    Console.Error.WriteLine("  PublicNuGetSmoke merge <xlsx-path>");
     Console.Error.WriteLine("  PublicNuGetSmoke verify <xlsx-path> [use-header-row]");
     Console.Error.WriteLine("  PublicNuGetSmoke generate <xlsx-path> [rows] [columns]");
     Console.Error.WriteLine("  PublicNuGetSmoke <managed|rust> <xlsx-path> [passes] [warmup-passes]");

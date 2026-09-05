@@ -1,8 +1,10 @@
 using System.Collections;
 using System.Data;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 
 namespace MiniExcelLibs;
@@ -13,6 +15,65 @@ namespace MiniExcelLibs;
 public static class MiniExcelRust
 {
     private const int BatchSize = 64;
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryAsync(
+        string path,
+        bool useHeaderRow = false,
+        string? sheetName = null,
+        string startCell = "A1",
+        MiniExcelRustReadOptions? configuration = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ToAsyncEnumerable(
+            Query(path, useHeaderRow, sheetName, startCell, configuration),
+            cancellationToken);
+    }
+
+    public static IAsyncEnumerable<T> QueryAsync<T>(
+        string path,
+        string? sheetName = null,
+        string startCell = "A1",
+        bool treatHeaderAsData = false,
+        MiniExcelRustReadOptions? configuration = null,
+        CancellationToken cancellationToken = default)
+        where T : class, new()
+    {
+        return ToAsyncEnumerable(
+            Query<T>(path, sheetName, startCell, treatHeaderAsData, configuration),
+            cancellationToken);
+    }
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryRangeAsync(
+        string path,
+        bool useHeaderRow = false,
+        string? sheetName = null,
+        string startCell = "A1",
+        string? endCell = null,
+        MiniExcelRustReadOptions? configuration = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ToAsyncEnumerable(
+            QueryRange(path, useHeaderRow, sheetName, startCell, endCell, configuration),
+            cancellationToken);
+    }
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryTableAsync(
+        string path,
+        string? sheetName = null,
+        string tableName = "Table1",
+        CancellationToken cancellationToken = default)
+    {
+        return ToAsyncEnumerable(QueryTable(path, sheetName, tableName), cancellationToken);
+    }
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryCsvAsync(
+        string path,
+        bool useHeaderRow = false,
+        MiniExcelRustCsvReadOptions? configuration = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ToAsyncEnumerable(QueryCsv(path, useHeaderRow, configuration), cancellationToken);
+    }
 
     public static IEnumerable<T> Query<T>(
         string path,
@@ -860,6 +921,64 @@ public static class MiniExcelRust
         }
     }
 
+    public static void FillTemplate(
+        string destinationPath,
+        string templatePath,
+        object value,
+        bool overwriteFile = false,
+        bool ignoreMissingVariables = true)
+    {
+        if (string.IsNullOrWhiteSpace(destinationPath))
+            throw new ArgumentException("The destination path is required.", nameof(destinationPath));
+        if (string.IsNullOrWhiteSpace(templatePath))
+            throw new ArgumentException("The template path is required.", nameof(templatePath));
+        if (value is null)
+            throw new ArgumentNullException(nameof(value));
+
+        EnsureAbiVersion();
+        var json = JsonSerializer.SerializeToUtf8Bytes(value, value.GetType());
+        using var nativeDestinationPath = new Utf8String(Path.GetFullPath(destinationPath));
+        using var nativeTemplatePath = new Utf8String(Path.GetFullPath(templatePath));
+        var jsonHandle = GCHandle.Alloc(json, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.FillTemplate(
+                nativeDestinationPath.Pointer,
+                nativeTemplatePath.Pointer,
+                jsonHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)json.Length,
+                overwriteFile ? (byte)1 : (byte)0,
+                ignoreMissingVariables ? (byte)1 : (byte)0);
+            if (result < 0)
+                throw CreateNativeException(result);
+        }
+        finally
+        {
+            jsonHandle.Free();
+        }
+    }
+
+    public static void MergeSameCells(
+        string destinationPath,
+        string sourcePath,
+        bool overwriteFile = false)
+    {
+        if (string.IsNullOrWhiteSpace(destinationPath))
+            throw new ArgumentException("The destination path is required.", nameof(destinationPath));
+        if (string.IsNullOrWhiteSpace(sourcePath))
+            throw new ArgumentException("The source path is required.", nameof(sourcePath));
+
+        EnsureAbiVersion();
+        using var nativeDestinationPath = new Utf8String(Path.GetFullPath(destinationPath));
+        using var nativeSourcePath = new Utf8String(Path.GetFullPath(sourcePath));
+        var result = NativeMethods.MergeSameCells(
+            nativeDestinationPath.Pointer,
+            nativeSourcePath.Pointer,
+            overwriteFile ? (byte)1 : (byte)0);
+        if (result < 0)
+            throw CreateNativeException(result);
+    }
+
     private static IEnumerable<IDictionary<string, object?>> QueryStreamIterator(
         Stream stream,
         bool useHeaderRow,
@@ -1198,6 +1317,18 @@ public static class MiniExcelRust
         }
 
         return table;
+    }
+
+    private static async IAsyncEnumerable<T> ToAsyncEnumerable<T>(
+        IEnumerable<T> values,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        foreach (var value in values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return value;
+            await Task.Yield();
+        }
     }
 
     private static byte[] EncodeRows(IEnumerable<IDictionary<string, object?>> rows)
@@ -1722,6 +1853,21 @@ public static class MiniExcelRust
             byte removeSupportedRelationships,
             byte overwriteDestination,
             out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_fill_template", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int FillTemplate(
+            IntPtr destinationPath,
+            IntPtr templatePath,
+            IntPtr jsonData,
+            UIntPtr jsonLength,
+            byte overwriteFile,
+            byte ignoreMissingVariables);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_merge_same_cells", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int MergeSameCells(
+            IntPtr destinationPath,
+            IntPtr sourcePath,
+            byte overwriteFile);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_buffer_close", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void BufferClose(IntPtr handle);

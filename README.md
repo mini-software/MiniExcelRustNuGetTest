@@ -81,6 +81,11 @@ var csvRows = MiniExcelRust.QueryCsv(
 MiniExcelRust.SaveAsCsv(
     "output.csv",
     new[] { new Dictionary<string, object?> { ["Name"] = "alpha" } });
+
+MiniExcelRust.FillTemplate(
+    "report.xlsx",
+    "template.xlsx",
+    new { title = "Quarterly report", items = new[] { new { name = "Ada" } } });
 ```
 
 Stream overloads stage input to a temporary file so the Rust engine can retain its bounded-memory

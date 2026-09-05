@@ -30,7 +30,7 @@ limits; **Missing** has no production implementation yet.
 | Adapters | `QueryAsDataTable` | Verified | Single selected sheet; materialized managed adapter |
 | Adapters | `GetReader` | Partial | Single selected sheet and materialized rows; no `NextResult` yet |
 | Async | Metadata tasks | Partial | Runs Rust operation on a worker; no in-flight native cancellation |
-| Async | `IAsyncEnumerable<T>` query | Missing | Requires cancellable native iterator and netstandard async interfaces |
+| Async | `IAsyncEnumerable<T>` query | Partial | XLSX, typed, table and CSV enumeration plus pre-cancellation verified; in-flight native batch cancellation remains |
 | Typed read | POCO/attribute mapping | Partial | Properties, name aliases, GUID, enum, integer and nullable conversions verified; full attributes/culture/errors remain |
 | Comments | Notes/threaded comments | Verified | Path/stream, authors, timestamps, replies, resolved state and legacy notes |
 | CSV read | Dynamic query, path/stream | Verified | Header, delimiter, BOM, Unicode, quoted text and empty string |
@@ -41,7 +41,8 @@ limits; **Missing** has no production implementation yet.
 | XLSX write | Typed/async/multi-sheet export | Missing | Rust core exists; input schema/callback ABI required |
 | Workbook edits | Rename/reorder/visibility | Verified | Atomic path operations checked through C# and Rust metadata readers |
 | Workbook edits | Dynamic insert/copy-and-add, path | Partial | Add/reject/replace/source preservation verified; stream and complex relationship policies remain |
-| Templates | Fill/merge | Missing | Rust core is partial; formula and relationship parity required |
+| Templates | Path-to-path fill | Partial | Scalars, list expansion, strict missing variables and overwrite verified; stream/bytes combinations remain |
+| Templates | `MergeSameCells`, path | Verified | Merge refs, marker removal, source preservation and overwrite verified |
 | Pictures | AddPicture | Missing | Rust core implementation required |
 | Fluent mapping | Read/write/template | Missing | Managed mapping plan plus Rust execution required |
 | Legacy facade | `MiniExcelLibs.MiniExcel` | Missing | Must be added after behavior-level APIs stabilize |
