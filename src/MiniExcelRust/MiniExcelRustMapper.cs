@@ -1,14 +1,21 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Reflection;
+using System.Resources;
 
 namespace MiniExcelLibs;
 
 internal static class MiniExcelRustMapper
 {
-    public static IEnumerable<IDictionary<string, object?>> ToRows<T>(IEnumerable<T> values)
+    public static IEnumerable<IDictionary<string, object?>> ToRows<T>(
+        IEnumerable<T> values,
+        IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>? dynamicColumns = null)
     {
-        var mappings = CreateMappings(typeof(T), forWrite: true)
+        var mappings = CreateMappings(
+                typeof(T),
+                forWrite: true,
+                CultureInfo.InvariantCulture,
+                dynamicColumns)
             .OrderBy(mapping => mapping.Index ?? int.MaxValue)
             .ToList();
         foreach (var value in values)
@@ -17,18 +24,21 @@ internal static class MiniExcelRustMapper
                 throw new ArgumentException("Typed export rows cannot contain null values.", nameof(values));
             IDictionary<string, object?> row = new Dictionary<string, object?>(StringComparer.Ordinal);
             foreach (var mapping in mappings)
-                row.Add(mapping.Names[0], NormalizeWriteValue(mapping.GetValue(value)));
+                row.Add(
+                    mapping.Names[0],
+                    NormalizeWriteValue(mapping.FormatValue(mapping.GetValue(value))));
             yield return row;
         }
     }
 
     public static IEnumerable<T> Map<T>(
         IEnumerable<IDictionary<string, object?>> rows,
-        CultureInfo? culture = null)
+        CultureInfo? culture = null,
+        IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>? dynamicColumns = null)
         where T : class, new()
     {
         culture ??= CultureInfo.InvariantCulture;
-        var mappings = CreateMappings(typeof(T), forWrite: false);
+        var mappings = CreateMappings(typeof(T), forWrite: false, culture, dynamicColumns);
         var rowIndex = 1;
         foreach (var row in rows)
         {
@@ -62,7 +72,11 @@ internal static class MiniExcelRustMapper
         }
     }
 
-    private static IReadOnlyList<MemberMapping> CreateMappings(Type type, bool forWrite)
+    private static IReadOnlyList<MemberMapping> CreateMappings(
+        Type type,
+        bool forWrite,
+        CultureInfo culture,
+        IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>? dynamicColumns)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
         var members = type.GetProperties(flags)
@@ -73,15 +87,20 @@ internal static class MiniExcelRustMapper
             .Concat(type.GetFields(flags).Where(HasMiniExcelAttribute));
         return members
             .Where(member => !IsIgnored(member))
-            .Select(CreateMapping)
+            .Select(member => CreateMapping(member, culture, dynamicColumns))
+            .Where(mapping => !mapping.Ignore)
             .ToList();
     }
 
-    private static MemberMapping CreateMapping(MemberInfo member)
+    private static MemberMapping CreateMapping(
+        MemberInfo member,
+        CultureInfo culture,
+        IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>? dynamicColumns)
     {
         var names = new List<string> { member.Name };
         int? index = null;
         string? format = null;
+        Type? resourceType = null;
         foreach (var attribute in member.CustomAttributes)
         {
             var name = attribute.AttributeType.Name;
@@ -90,6 +109,7 @@ internal static class MiniExcelRustMapper
                 AddConstructorName(attribute, names);
                 AddNamedString(attribute, "Name", names);
                 AddAliases(attribute, names);
+                resourceType = ReadNamedType(attribute, "ResourceType") ?? resourceType;
             }
             else if (name is "ExcelColumnIndexAttribute" or "MiniExcelColumnIndexAttribute")
             {
@@ -101,6 +121,7 @@ internal static class MiniExcelRustMapper
                 AddAliases(attribute, names);
                 index = ReadNamedInt(attribute, "Index") ?? index;
                 format = ReadNamedString(attribute, "Format") ?? format;
+                resourceType = ReadNamedType(attribute, "ResourceType") ?? resourceType;
             }
             else if (name is "ExcelFormatAttribute" or "MiniExcelFormatAttribute")
             {
@@ -110,6 +131,16 @@ internal static class MiniExcelRustMapper
 
         if (member.GetCustomAttribute<DisplayNameAttribute>() is { DisplayName.Length: > 0 } display)
             names.Insert(0, display.DisplayName);
+        if (resourceType is not null)
+            names[0] = GetLocalizedName(resourceType, names[0], culture);
+
+        var dynamicColumn = dynamicColumns is not null && dynamicColumns.TryGetValue(member.Name, out var configured)
+            ? configured
+            : null;
+        if (!string.IsNullOrWhiteSpace(dynamicColumn?.Name))
+            names.Insert(0, dynamicColumn!.Name!);
+        index = dynamicColumn?.Index ?? index;
+        format = dynamicColumn?.Format ?? format;
 
         var valueType = member is PropertyInfo property ? property.PropertyType : ((FieldInfo)member).FieldType;
         return new MemberMapping(
@@ -117,7 +148,9 @@ internal static class MiniExcelRustMapper
             names.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
             index,
             valueType,
-            format);
+            format,
+            dynamicColumn?.Ignore is true,
+            dynamicColumn?.CustomFormatter);
     }
 
     private static bool TryGetValue(
@@ -286,6 +319,20 @@ internal static class MiniExcelRustMapper
         return argument.TypedValue.Value as string;
     }
 
+    private static Type? ReadNamedType(CustomAttributeData attribute, string propertyName)
+    {
+        var argument = attribute.NamedArguments.FirstOrDefault(item => item.MemberName == propertyName);
+        return argument.TypedValue.Value as Type;
+    }
+
+    private static string GetLocalizedName(Type resourceType, string key, CultureInfo culture)
+    {
+        const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        var manager = resourceType.GetProperty(nameof(ResourceManager), flags)?.GetValue(null) as ResourceManager
+            ?? new ResourceManager(resourceType);
+        return manager.GetString(key, culture) ?? key;
+    }
+
     private static int ColumnNameToIndex(string columnName)
     {
         var index = 0;
@@ -303,12 +350,15 @@ internal static class MiniExcelRustMapper
         string[] names,
         int? index,
         Type valueType,
-        string? format)
+        string? format,
+        bool ignore,
+        Func<object?, object?>? customFormatter)
     {
         public string[] Names { get; } = names;
         public int? Index { get; } = index;
         public Type ValueType { get; } = valueType;
         public string? Format { get; } = format;
+        public bool Ignore { get; } = ignore;
 
         public void SetValue(object target, object? value)
         {
@@ -323,6 +373,20 @@ internal static class MiniExcelRustMapper
             return member is PropertyInfo property
                 ? property.GetValue(target)
                 : ((FieldInfo)member).GetValue(target);
+        }
+
+        public object? FormatValue(object? value)
+        {
+            if (customFormatter is null)
+                return value;
+            try
+            {
+                return customFormatter(value);
+            }
+            catch
+            {
+                return value;
+            }
         }
     }
 }

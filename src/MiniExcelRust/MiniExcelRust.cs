@@ -85,7 +85,8 @@ public static class MiniExcelRust
     {
         return MiniExcelRustMapper.Map<T>(
             Query(path, !treatHeaderAsData, sheetName, startCell, configuration),
-            configuration?.Culture);
+            configuration?.Culture,
+            configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
     }
 
     public static IEnumerable<T> Query<T>(
@@ -99,7 +100,8 @@ public static class MiniExcelRust
     {
         return MiniExcelRustMapper.Map<T>(
             Query(stream, !treatHeaderAsData, sheetName, startCell, configuration, leaveOpen),
-            configuration?.Culture);
+            configuration?.Culture,
+            configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
     }
 
     public static IEnumerable<T> QueryRange<T>(
@@ -113,7 +115,8 @@ public static class MiniExcelRust
     {
         return MiniExcelRustMapper.Map<T>(
             QueryRange(path, !treatHeaderAsData, sheetName, startCell, endCell, configuration),
-            configuration?.Culture);
+            configuration?.Culture,
+            configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
     }
 
     public static IEnumerable<T> QueryTable<T>(
@@ -133,7 +136,8 @@ public static class MiniExcelRust
     {
         return MiniExcelRustMapper.Map<T>(
             QueryCsv(path, !treatHeaderAsData, configuration),
-            configuration?.Culture);
+            configuration?.Culture,
+            configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
     }
 
     /// <summary>
@@ -1015,6 +1019,23 @@ public static class MiniExcelRust
             payloadHandle.Free();
             frameHandle.Free();
         }
+    }
+
+    public static int SaveAs<T>(
+        string path,
+        IEnumerable<T> rows,
+        MiniExcelRustWriteOptions options)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (options is null)
+            throw new ArgumentNullException(nameof(options));
+        var dynamicColumns = options.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>;
+        var dynamicRows = MiniExcelRustMapper.ToRows(rows, dynamicColumns).ToList();
+        if (dynamicRows.Count == 0)
+            throw new ArgumentException("Typed configured export requires at least one row.", nameof(rows));
+        var schema = dynamicRows[0].Keys.ToList();
+        return SaveAsWithSchema(path, schema, dynamicRows, options);
     }
 
     /// <summary>

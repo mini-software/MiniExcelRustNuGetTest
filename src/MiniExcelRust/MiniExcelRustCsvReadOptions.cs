@@ -16,6 +16,9 @@ public sealed class MiniExcelRustCsvReadOptions
 {
     public System.Globalization.CultureInfo Culture { get; set; } = System.Globalization.CultureInfo.InvariantCulture;
 
+    public IDictionary<string, MiniExcelRustDynamicColumn> DynamicColumns { get; } =
+        new Dictionary<string, MiniExcelRustDynamicColumn>(StringComparer.Ordinal);
+
     public char Delimiter { get; set; } = ',';
 
     public MiniExcelRustCsvEncoding Encoding { get; set; } = MiniExcelRustCsvEncoding.Utf8;

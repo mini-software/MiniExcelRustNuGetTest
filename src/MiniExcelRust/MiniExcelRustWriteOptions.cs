@@ -34,4 +34,6 @@ public sealed class MiniExcelRustWriteOptions
     public IDictionary<string, string> ColumnFormats { get; } = new Dictionary<string, string>();
     public IDictionary<string, double> ColumnWidths { get; } = new Dictionary<string, double>();
     public IDictionary<string, bool> HiddenColumns { get; } = new Dictionary<string, bool>();
+    public IDictionary<string, MiniExcelRustDynamicColumn> DynamicColumns { get; } =
+        new Dictionary<string, MiniExcelRustDynamicColumn>(StringComparer.Ordinal);
 }

@@ -21,17 +21,17 @@ limits; **Missing** has no production implementation yet.
 | XLSX read | Dynamic `Query`, path | Verified | Header/headerless, sheet, start cell, scalar values, Unicode |
 | XLSX read | Dynamic `Query`, stream | Verified | `leaveOpen` and early disposal; currently stages to a temp file |
 | XLSX read | `QueryRange`, path/stream | Verified | Inclusive A1 end cell |
-| XLSX read | `ReadOptions` | Partial | Ignore missing rows and header behavior tested; merged-fill semantics differ |
+| XLSX read | `ReadOptions` | Verified | Header/trim, missing and self-closing rows, physical merged-cell presence and shared-cache options covered |
 | XLSX read | `QueryTable`, path/stream | Verified | Named table and case-insensitive table name |
 | Metadata | Sheet names | Verified | Path, stream, sync and task-based async |
 | Metadata | Column names | Verified | Header/headerless, sheet and start cell |
-| Metadata | Sheet dimensions | Verified | Path/stream and normal declared OOXML dimensions |
+| Metadata | Sheet dimensions | Verified | Path/stream, declared ranges and missing-dimension parity |
 | Metadata | Sheet information | Verified | ID, index, name, hidden state, active state and sheet type |
 | Adapters | `QueryAsDataTable` | Verified | Single selected sheet; materialized managed adapter |
 | Adapters | `GetReader` | Verified | Selected/all sheets, path/stream, materialized rows and `NextResult` verified |
 | Async | Metadata tasks | Partial | Runs Rust operation on a worker; no in-flight native cancellation |
 | Async | `IAsyncEnumerable<T>` query | Partial | XLSX, typed, table and CSV enumeration plus pre-cancellation verified; in-flight native batch cancellation remains |
-| Typed read/write | POCO/attribute mapping | Partial | Properties, readonly export, rename/alias/ignore, GUID, enum, nullable, culture, ExcelFormat and missing-column errors verified; localization/dynamic mappings remain |
+| Typed read/write | POCO/attribute mapping | Partial | Properties/fields, index, readonly export, rename/alias/ignore, GUID, enum, nullable, culture, localization, dynamic overrides/formatters, ExcelFormat and errors verified; formula-column output remains |
 | Comments | Notes/threaded comments | Verified | Path/stream, authors, timestamps, replies, resolved state and legacy notes |
 | CSV read | Dynamic query, path/stream | Verified | Header, delimiter, BOM, Unicode, quoted text and empty string |
 | CSV metadata | Column names | Verified | Path, stream, sync and task-based async |
@@ -46,16 +46,13 @@ limits; **Missing** has no production implementation yet.
 | Templates | Path/stream/byte[] fill | Partial | All source/destination combinations, scalars, list expansion, strict missing variables and overwrite verified; advanced parity remains |
 | Templates | `MergeSameCells`, path/stream/byte[] | Verified | Merge refs, marker removal, source preservation and overwrite verified |
 | Pictures | AddPicture | Missing | Rust core implementation required |
-| Fluent mapping | Read/write/template | Missing | Managed mapping plan plus Rust execution required |
-| Legacy facade | `MiniExcelLibs.MiniExcel` | Partial | Common sync/async path/stream query, write, template, reader, metadata and conversion groups delegate only to Rust; full configuration surface remains |
+| Fluent mapping | Exact-cell reads | Verified | Rust `CellMap` path/stream dynamic and typed adapters verified |
+| Fluent mapping | Collections/write/template | Missing | Collection spacing/nesting and mapped export/template plans remain |
+| Legacy facade | `MiniExcelLibs.MiniExcel` | Partial | Common sync/async path/stream query, write, template, reader, metadata, conversion and ExcelType/configuration routing delegate only to Rust; exact remaining overloads stay open |
 
 ## Confirmed differences
 
-1. `FillMergedCells`: C# fills only explicitly represented empty cells in a merged range; Rust 0.4
-   synthesizes cells that are absent from worksheet XML.
-2. Self-closing empty row: C# currently emits `<row/>` even with `IgnoreEmptyRows=true`; Rust skips it.
-3. Missing `<dimension>`: C# reports an empty range; Rust scans cells and returns the actual range.
-4. CSV empty-as-null: the checked-out C# source applies the setting, while the pinned
+1. CSV empty-as-null: the checked-out C# source applies the setting, while the pinned
    `2.0.0-preview.4` NuGet oracle returned an empty string in the exercised dynamic query.
 
 These rows remain open until the intended C# source contract is selected and encoded as explicit

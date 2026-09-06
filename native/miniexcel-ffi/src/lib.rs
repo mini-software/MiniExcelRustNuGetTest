@@ -1,5 +1,8 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
+use std::fs::File;
+use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::str::FromStr;
@@ -12,6 +15,9 @@ use miniexcel::{
     RgbColor, SheetType, SheetVisibility, TableStyle, TargetRelationshipPolicy, TemplateOptions,
     VerticalAlignment, WriteOptions,
 };
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::{BytesStart, Event};
+use zip::ZipArchive;
 
 const ABI_VERSION: u32 = 1;
 const RESULT_END: i32 = 0;
@@ -28,6 +34,101 @@ thread_local! {
 pub struct QueryHandle {
     rows: Box<dyn Iterator<Item = miniexcel::Result<DynamicRow>> + Send>,
     frame: Vec<u8>,
+}
+
+struct PhysicalRowIterator {
+    inner: Box<dyn Iterator<Item = miniexcel::Result<DynamicRow>> + Send>,
+    pattern: std::vec::IntoIter<PhysicalRowAction>,
+    columns: Vec<String>,
+    start_column: usize,
+    normalize_merged_cells: bool,
+    merged_ranges: Vec<MergedRangeInfo>,
+    merge_anchor_values: Vec<Option<CellValue>>,
+}
+
+enum PhysicalRowAction {
+    Data { row: usize, columns: Vec<usize> },
+    Empty,
+    Skip,
+}
+
+#[derive(Clone, Copy)]
+struct MergedRangeInfo {
+    start_row: usize,
+    start_column: usize,
+    end_row: usize,
+    end_column: usize,
+}
+
+impl Iterator for PhysicalRowIterator {
+    type Item = miniexcel::Result<DynamicRow>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for action in self.pattern.by_ref() {
+            match action {
+                PhysicalRowAction::Empty => {
+                    let row = self
+                        .columns
+                        .iter()
+                        .cloned()
+                        .map(|column| (column, CellValue::Empty))
+                        .collect();
+                    return Some(Ok(row));
+                }
+                PhysicalRowAction::Data {
+                    row: row_index,
+                    columns: physical_columns,
+                } => {
+                    let mut row = self.inner.next()?;
+                    if self.normalize_merged_cells {
+                        if let Ok(row) = row.as_mut() {
+                            for (offset, (_, value)) in row.iter_mut().enumerate() {
+                                let column = self.start_column + offset;
+                                if !physical_columns.contains(&column) {
+                                    *value = CellValue::Empty;
+                                }
+                            }
+                            for (index, range) in self.merged_ranges.iter().enumerate() {
+                                if row_index == range.start_row {
+                                    let offset =
+                                        range.start_column.saturating_sub(self.start_column);
+                                    self.merge_anchor_values[index] =
+                                        row.get_index(offset).map(|(_, value)| value.clone());
+                                }
+                                if row_index < range.start_row || row_index > range.end_row {
+                                    continue;
+                                }
+                                let Some(anchor) = self.merge_anchor_values[index].as_ref() else {
+                                    continue;
+                                };
+                                for column in range.start_column..=range.end_column {
+                                    if column == range.start_column && row_index == range.start_row
+                                    {
+                                        continue;
+                                    }
+                                    if physical_columns.contains(&column) {
+                                        let offset = column.saturating_sub(self.start_column);
+                                        if let Some((_, value)) = row.get_index_mut(offset) {
+                                            if value.is_empty() {
+                                                *value = anchor.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Some(row);
+                }
+                PhysicalRowAction::Skip => {
+                    if let Err(error) = self.inner.next()? {
+                        return Some(Err(error));
+                    }
+                }
+            }
+        }
+        self.inner.next()
+    }
 }
 
 pub struct BufferHandle {
@@ -58,6 +159,8 @@ struct CsvWriteArguments {
     print_header: u8,
     overwrite_file: u8,
 }
+
+type DeclaredDimension = (Option<String>, Option<String>);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn miniexcel_abi_version() -> u32 {
@@ -527,27 +630,12 @@ pub unsafe extern "C" fn miniexcel_get_sheet_dimensions(
         }
 
         let path = unsafe { read_utf8(path) }?;
-        let dimensions = MiniExcel::get_sheet_dimensions(path).map_err(|error| {
-            set_last_error(error.to_string());
-            ERROR_QUERY
-        })?;
+        let dimensions = declared_sheet_dimensions(path)?;
         let mut frame = Vec::new();
         write_length(&mut frame, dimensions.len())?;
-        for dimension in dimensions {
-            write_string(
-                &mut frame,
-                dimension
-                    .start_cell()
-                    .map(|cell| cell.to_string())
-                    .unwrap_or_default(),
-            )?;
-            write_string(
-                &mut frame,
-                dimension
-                    .end_cell()
-                    .map(|cell| cell.to_string())
-                    .unwrap_or_default(),
-            )?;
+        for (start_cell, end_cell) in dimensions {
+            write_string(&mut frame, start_cell.unwrap_or_default())?;
+            write_string(&mut frame, end_cell.unwrap_or_default())?;
         }
 
         let handle = Box::new(BufferHandle { frame });
@@ -1336,8 +1424,10 @@ unsafe fn open_query(
 
     unsafe { ptr::write(out_handle, ptr::null_mut()) };
     let path = unsafe { read_utf8(path) }?;
-    let start_cell = unsafe { read_utf8(start_cell) }?;
-    let start_cell = CellReference::from_str(start_cell).map_err(|error| {
+    let start_cell_text = unsafe { read_utf8(start_cell) }?;
+    let start_row = cell_row_index(start_cell_text)?;
+    let start_column = cell_column_index(start_cell_text)?;
+    let start_cell = CellReference::from_str(start_cell_text).map_err(|error| {
         set_last_error(error.to_string());
         ERROR_INVALID_ARGUMENT
     })?;
@@ -1355,18 +1445,22 @@ unsafe fn open_query(
         .with_shared_string_disk_cache(enable_shared_string_cache != 0)
         .with_shared_string_cache_size(shared_string_cache_size);
 
+    let mut end_row = None;
     if !end_cell.is_null() {
-        let end_cell = unsafe { read_utf8(end_cell) }?;
-        let end_cell = CellReference::from_str(end_cell).map_err(|error| {
+        let end_cell_text = unsafe { read_utf8(end_cell) }?;
+        end_row = Some(cell_row_index(end_cell_text)?);
+        let end_cell = CellReference::from_str(end_cell_text).map_err(|error| {
             set_last_error(error.to_string());
             ERROR_INVALID_ARGUMENT
         })?;
         options = options.with_end_cell(end_cell);
     }
 
+    let mut selected_sheet_name = None;
     if !sheet_name.is_null() {
         let sheet_name = unsafe { read_utf8(sheet_name) }?;
         if !sheet_name.is_empty() {
+            selected_sheet_name = Some(sheet_name.to_owned());
             options = options.with_sheet_name(sheet_name);
         }
     }
@@ -1382,6 +1476,38 @@ unsafe fn open_query(
         set_last_error(error.to_string());
         ERROR_QUERY
     })?;
+    let rows: Box<dyn Iterator<Item = miniexcel::Result<DynamicRow>> + Send> =
+        if ignore_empty_rows != 0 {
+            let columns = MiniExcel::get_columns(path, &options).map_err(|error| {
+                set_last_error(error.to_string());
+                ERROR_QUERY
+            })?;
+            let (mut pattern, merged_ranges) = worksheet_physical_row_pattern(
+                path,
+                selected_sheet_name.as_deref(),
+                start_row,
+                end_row,
+            )?;
+            if use_header_row != 0 {
+                if let Some(header_index) = pattern
+                    .iter()
+                    .position(|action| matches!(action, PhysicalRowAction::Data { .. }))
+                {
+                    pattern.remove(header_index);
+                }
+            }
+            Box::new(PhysicalRowIterator {
+                inner: rows,
+                pattern: pattern.into_iter(),
+                columns,
+                start_column,
+                normalize_merged_cells: fill_merged_cells != 0,
+                merge_anchor_values: vec![None; merged_ranges.len()],
+                merged_ranges,
+            })
+        } else {
+            rows
+        };
     let handle = Box::new(QueryHandle {
         rows,
         frame: Vec::new(),
@@ -1804,6 +1930,309 @@ fn json_u64(payload: &serde_json::Value, name: &str, default: u64) -> Result<u64
 fn invalid_write_options(message: &str) -> i32 {
     set_last_error(format!("invalid write options: {message}"));
     ERROR_INVALID_ARGUMENT
+}
+
+fn declared_sheet_dimensions(path: &str) -> Result<Vec<DeclaredDimension>, i32> {
+    let file = File::open(path).map_err(metadata_error)?;
+    let mut archive = ZipArchive::new(file).map_err(metadata_error)?;
+    let workbook = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let relationships = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let sheet_relationship_ids = workbook_sheet_relationships(&workbook)?;
+    let relationship_targets = workbook_relationship_targets(&relationships)?;
+    let mut dimensions = Vec::with_capacity(sheet_relationship_ids.len());
+    for relationship_id in sheet_relationship_ids {
+        let target = relationship_targets.get(&relationship_id).ok_or_else(|| {
+            set_last_error(format!(
+                "workbook relationship '{relationship_id}' was not found"
+            ));
+            ERROR_QUERY
+        })?;
+        let worksheet_path = normalize_workbook_target(target);
+        let worksheet = read_zip_entry(&mut archive, &worksheet_path)?;
+        dimensions.push(worksheet_declared_dimension(&worksheet)?);
+    }
+    Ok(dimensions)
+}
+
+fn worksheet_physical_row_pattern(
+    path: &str,
+    sheet_name: Option<&str>,
+    start_row: usize,
+    end_row: Option<usize>,
+) -> Result<(Vec<PhysicalRowAction>, Vec<MergedRangeInfo>), i32> {
+    let file = File::open(path).map_err(metadata_error)?;
+    let mut archive = ZipArchive::new(file).map_err(metadata_error)?;
+    let workbook = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let relationships = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let sheets = workbook_sheets(&workbook)?;
+    let relationship_id = match sheet_name {
+        Some(name) => sheets
+            .iter()
+            .find(|(sheet, _)| sheet.eq_ignore_ascii_case(name))
+            .map(|(_, relationship)| relationship),
+        None => sheets.first().map(|(_, relationship)| relationship),
+    }
+    .ok_or_else(|| {
+        set_last_error(format!(
+            "worksheet '{}' was not found",
+            sheet_name.unwrap_or("<first>")
+        ));
+        ERROR_QUERY
+    })?;
+    let targets = workbook_relationship_targets(&relationships)?;
+    let target = targets.get(relationship_id).ok_or_else(|| {
+        set_last_error(format!(
+            "workbook relationship '{relationship_id}' was not found"
+        ));
+        ERROR_QUERY
+    })?;
+    let worksheet = read_zip_entry(&mut archive, &normalize_workbook_target(target))?;
+    physical_row_pattern(&worksheet, start_row, end_row)
+}
+
+fn physical_row_pattern(
+    worksheet: &[u8],
+    start_row: usize,
+    end_row: Option<usize>,
+) -> Result<(Vec<PhysicalRowAction>, Vec<MergedRangeInfo>), i32> {
+    let mut reader = XmlReader::from_reader(worksheet);
+    let mut pattern = Vec::new();
+    let mut current_row: Option<(usize, Vec<usize>)> = None;
+    let mut last_row = 0_usize;
+    let mut skip_next_data_row = false;
+    let mut merged_ranges = Vec::new();
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event) if event.local_name().as_ref() == b"row" => {
+                let row = row_number(&reader, &event, last_row + 1)?;
+                last_row = row;
+                current_row = Some((row, Vec::new()));
+            }
+            Event::Empty(event) if event.local_name().as_ref() == b"row" => {
+                let row = row_number(&reader, &event, last_row + 1)?;
+                last_row = row;
+                if row >= start_row && end_row.is_none_or(|end| row <= end) {
+                    pattern.push(PhysicalRowAction::Empty);
+                    skip_next_data_row = true;
+                }
+            }
+            Event::Start(event) | Event::Empty(event) if event.local_name().as_ref() == b"c" => {
+                if let Some((_, columns)) = current_row.as_mut() {
+                    let column = xml_attribute(&reader, &event, b"r")?
+                        .as_deref()
+                        .map(cell_column_index)
+                        .transpose()?
+                        .unwrap_or(columns.len() + 1);
+                    columns.push(column);
+                }
+            }
+            Event::End(event) if event.local_name().as_ref() == b"row" => {
+                if let Some((row, columns)) = current_row.take() {
+                    if !columns.is_empty()
+                        && row >= start_row
+                        && end_row.is_none_or(|end| row <= end)
+                    {
+                        if skip_next_data_row {
+                            skip_next_data_row = false;
+                            pattern.push(PhysicalRowAction::Skip);
+                        } else {
+                            pattern.push(PhysicalRowAction::Data { row, columns });
+                        }
+                    }
+                }
+            }
+            Event::Empty(event) if event.local_name().as_ref() == b"mergeCell" => {
+                if let Some(reference) = xml_attribute(&reader, &event, b"ref")? {
+                    merged_ranges.push(parse_merged_range(&reference)?);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok((pattern, merged_ranges))
+}
+
+fn parse_merged_range(reference: &str) -> Result<MergedRangeInfo, i32> {
+    let (start, end) = reference.split_once(':').unwrap_or((reference, reference));
+    Ok(MergedRangeInfo {
+        start_row: cell_row_index(start)?,
+        start_column: cell_column_index(start)?,
+        end_row: cell_row_index(end)?,
+        end_column: cell_column_index(end)?,
+    })
+}
+
+fn row_number(
+    reader: &XmlReader<&[u8]>,
+    event: &BytesStart<'_>,
+    fallback: usize,
+) -> Result<usize, i32> {
+    match xml_attribute(reader, event, b"r")? {
+        Some(value) => value.parse().map_err(metadata_error),
+        None => Ok(fallback),
+    }
+}
+
+fn cell_row_index(reference: &str) -> Result<usize, i32> {
+    let digits = reference.trim_start_matches(|character: char| character.is_ascii_alphabetic());
+    digits.parse().map_err(|error| {
+        set_last_error(format!("invalid cell row in '{reference}': {error}"));
+        ERROR_INVALID_ARGUMENT
+    })
+}
+
+fn cell_column_index(reference: &str) -> Result<usize, i32> {
+    let mut column = 0_usize;
+    for character in reference.chars().take_while(char::is_ascii_alphabetic) {
+        column = column
+            .checked_mul(26)
+            .and_then(|value| {
+                value.checked_add(character.to_ascii_uppercase() as usize - 'A' as usize + 1)
+            })
+            .ok_or_else(|| {
+                set_last_error(format!(
+                    "cell column in '{reference}' exceeds the supported range"
+                ));
+                ERROR_INVALID_ARGUMENT
+            })?;
+    }
+    if column == 0 {
+        set_last_error(format!("invalid cell column in '{reference}'"));
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    Ok(column)
+}
+
+fn read_zip_entry<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    path: &str,
+) -> Result<Vec<u8>, i32> {
+    let mut entry = archive.by_name(path).map_err(metadata_error)?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).map_err(metadata_error)?;
+    Ok(bytes)
+}
+
+fn workbook_sheet_relationships(workbook: &[u8]) -> Result<Vec<String>, i32> {
+    let mut reader = XmlReader::from_reader(workbook);
+    let mut relationships = Vec::new();
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event) | Event::Empty(event)
+                if event.local_name().as_ref() == b"sheet" =>
+            {
+                if let Some(value) = xml_attribute(&reader, &event, b"r:id")? {
+                    relationships.push(value);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(relationships)
+}
+
+fn workbook_sheets(workbook: &[u8]) -> Result<Vec<(String, String)>, i32> {
+    let mut reader = XmlReader::from_reader(workbook);
+    let mut sheets = Vec::new();
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event) | Event::Empty(event)
+                if event.local_name().as_ref() == b"sheet" =>
+            {
+                if let (Some(name), Some(relationship)) = (
+                    xml_attribute(&reader, &event, b"name")?,
+                    xml_attribute(&reader, &event, b"r:id")?,
+                ) {
+                    sheets.push((name, relationship));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(sheets)
+}
+
+fn workbook_relationship_targets(relationships: &[u8]) -> Result<HashMap<String, String>, i32> {
+    let mut reader = XmlReader::from_reader(relationships);
+    let mut targets = HashMap::new();
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event) | Event::Empty(event)
+                if event.local_name().as_ref() == b"Relationship" =>
+            {
+                if let (Some(id), Some(target)) = (
+                    xml_attribute(&reader, &event, b"Id")?,
+                    xml_attribute(&reader, &event, b"Target")?,
+                ) {
+                    targets.insert(id, target);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(targets)
+}
+
+fn worksheet_declared_dimension(worksheet: &[u8]) -> Result<DeclaredDimension, i32> {
+    let mut reader = XmlReader::from_reader(worksheet);
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event) | Event::Empty(event)
+                if event.local_name().as_ref() == b"dimension" =>
+            {
+                let reference = xml_attribute(&reader, &event, b"ref")?;
+                return Ok(match reference {
+                    Some(reference) => {
+                        let (start, end) = reference
+                            .split_once(':')
+                            .map_or((reference.as_str(), reference.as_str()), |value| value);
+                        (Some(start.to_owned()), Some(end.to_owned()))
+                    }
+                    None => (None, None),
+                });
+            }
+            Event::Start(event) if event.local_name().as_ref() == b"sheetData" => {
+                return Ok((None, None));
+            }
+            Event::Eof => return Ok((None, None)),
+            _ => {}
+        }
+    }
+}
+
+fn xml_attribute(
+    reader: &XmlReader<&[u8]>,
+    event: &BytesStart<'_>,
+    name: &[u8],
+) -> Result<Option<String>, i32> {
+    for attribute in event.attributes() {
+        let attribute = attribute.map_err(metadata_error)?;
+        if attribute.key.as_ref() == name {
+            return attribute
+                .decode_and_unescape_value(reader.decoder())
+                .map(|value| Some(value.into_owned()))
+                .map_err(metadata_error);
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_workbook_target(target: &str) -> String {
+    let target = target.trim_start_matches('/');
+    if target.starts_with("xl/") {
+        target.to_owned()
+    } else {
+        format!("xl/{target}")
+    }
+}
+
+fn metadata_error(error: impl std::fmt::Display) -> i32 {
+    set_last_error(format!("failed to read XLSX metadata: {error}"));
+    ERROR_QUERY
 }
 
 fn decode_sheets(bytes: &[u8]) -> Result<Vec<(String, Vec<DynamicRow>)>, i32> {

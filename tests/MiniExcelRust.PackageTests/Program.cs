@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Data;
 using System.Globalization;
 using System.IO.Compression;
+using System.Resources;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -178,6 +179,8 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     CreateWorkbook(workbookPath);
     File.WriteAllText(csvPath, "Name;Note\r\nalpha;\"Taiwan 台灣\"\r\nbeta;\r\n", new UTF8Encoding(true));
     VerifyParity(workbookPath);
+    VerifyMissingDimensionParity(workbookPath);
+    VerifySelfClosingEmptyRowParity(workbookPath);
     VerifyCompatibilityFacade(workbookPath);
     VerifyCsvParity(csvPath);
     VerifyConversions();
@@ -200,6 +203,85 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
       File.Delete(workbookPath);
     if (File.Exists(csvPath))
       File.Delete(csvPath);
+  }
+}
+
+static void VerifyMissingDimensionParity(string sourcePath)
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-no-dimension-{Guid.NewGuid():N}.xlsx");
+  File.Copy(sourcePath, path);
+  try
+  {
+    using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+    {
+      foreach (var entryName in new[]
+      {
+        "xl/worksheets/sheet1.xml",
+        "xl/worksheets/sheet2.xml",
+        "xl/worksheets/sheet3.xml"
+      })
+      {
+        var entry = archive.GetEntry(entryName) ?? throw new InvalidDataException($"Missing {entryName}.");
+        XDocument document;
+        using (var input = entry.Open())
+          document = XDocument.Load(input);
+        XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        document.Root?.Element(spreadsheet + "dimension")?.Remove();
+        entry.Delete();
+        var replacement = archive.CreateEntry(entryName, CompressionLevel.Fastest);
+        using var output = replacement.Open();
+        document.Save(output);
+      }
+    }
+
+    var importer = ManagedMiniExcel.Importers.GetOpenXmlImporter();
+    var managed = importer.GetSheetDimensions(path);
+    var rust = MiniExcelRust.GetSheetDimensions(path);
+    Require(managed.Count == rust.Count, "missing-dimension: sheet count differs.");
+    for (var index = 0; index < managed.Count; index++)
+    {
+      Require(managed[index].StartCell == rust[index].StartCell, $"missing-dimension: start differs at {index}.");
+      Require(managed[index].EndCell == rust[index].EndCell, $"missing-dimension: end differs at {index}.");
+    }
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
+static void VerifySelfClosingEmptyRowParity(string sourcePath)
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-self-closing-{Guid.NewGuid():N}.xlsx");
+  File.Copy(sourcePath, path);
+  try
+  {
+    using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+    {
+      const string entryName = "xl/worksheets/sheet3.xml";
+      var entry = archive.GetEntry(entryName) ?? throw new InvalidDataException($"Missing {entryName}.");
+      string xml;
+      using (var reader = new StreamReader(entry.Open(), Encoding.UTF8))
+        xml = reader.ReadToEnd();
+      xml = xml.Replace("<row r=\"4\">", "<row r=\"3\"/><row r=\"4\">", StringComparison.Ordinal);
+      entry.Delete();
+      var replacement = archive.CreateEntry(entryName, CompressionLevel.Fastest);
+      using var writer = new StreamWriter(replacement.Open(), new UTF8Encoding(false));
+      writer.Write(xml);
+    }
+
+    var managedConfiguration = new OpenXmlConfiguration { IgnoreEmptyRows = true };
+    var rustConfiguration = new MiniExcelRustReadOptions { IgnoreEmptyRows = true };
+    var managed = QueryManaged(path, true, "Options", "A1", managedConfiguration).ToList();
+    var rust = MiniExcelRust.Query(path, true, "Options", "A1", rustConfiguration).ToList();
+    CompareRows(managed, rust, "self-closing-empty-row");
+    Require(rust.Count == 2, $"self-closing-empty-row: expected 2 rows, received {rust.Count}.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
   }
 }
 
@@ -534,6 +616,7 @@ static void VerifyTypedConversions()
 {
   var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-{Guid.NewGuid():N}.csv");
   var culturePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-culture-{Guid.NewGuid():N}.csv");
+  var localizedPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-localized-{Guid.NewGuid():N}.csv");
   var identifier = Guid.Parse("1ad46df8-08df-4ca6-8528-f79068fc23ea");
   try
   {
@@ -560,6 +643,17 @@ static void VerifyTypedConversions()
     Require(managedFormatted.Amount == rustFormatted.Amount && rustFormatted.Amount == 12.5d, "typed-culture: amount differs.");
     Require(managedFormatted.Date == rustFormatted.Date && rustFormatted.Date == new DateTime(2026, 9, 6), "typed-format: date differs.");
 
+    File.WriteAllText(localizedPath, "名稱\r\nAda\r\n", new UTF8Encoding(true));
+    var localizedCulture = CultureInfo.GetCultureInfo("zh-TW");
+    var localizedOptions = new MiniExcelRustCsvReadOptions { Culture = localizedCulture };
+    var rustLocalized = MiniExcelRust.QueryCsv<TypedLocalizedRow>(localizedPath, configuration: localizedOptions).Single();
+    Require(rustLocalized.Name == "Ada", $"typed-localization: rust={rustLocalized.Name ?? "<null>"}.");
+
+    var dynamicOptions = new MiniExcelRustCsvReadOptions();
+    dynamicOptions.DynamicColumns["Label"] = new MiniExcelRustDynamicColumn { Name = "Identifier" };
+    var dynamicMapped = MiniExcelRust.QueryCsv<TypedDynamicRow>(path, configuration: dynamicOptions).Single();
+    Require(dynamicMapped.Label == identifier, "typed-dynamic-column: value differs.");
+
     MiniExcelRustColumnNotFoundException? missingColumn = null;
     try
     {
@@ -579,6 +673,8 @@ static void VerifyTypedConversions()
       File.Delete(path);
     if (File.Exists(culturePath))
       File.Delete(culturePath);
+    if (File.Exists(localizedPath))
+      File.Delete(localizedPath);
   }
 }
 
@@ -589,6 +685,7 @@ static void VerifyTypedExports()
   var cancelledPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-cancelled-export-{Guid.NewGuid():N}.xlsx");
   var csvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-export-{Guid.NewGuid():N}.csv");
   var attributesPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-attribute-export-{Guid.NewGuid():N}.xlsx");
+  var formatterPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-formatter-export-{Guid.NewGuid():N}.xlsx");
   var identifier = Guid.Parse("32a2fac7-2ce2-4683-a735-118fe7c4949b");
   var rows = new[]
   {
@@ -648,10 +745,26 @@ static void VerifyTypedExports()
       attributeRows[0].Keys.SequenceEqual(new[] { "Renamed", "Readonly" }, StringComparer.Ordinal),
       "typed-attributes: exported columns differ.");
     Require(Equals(attributeRows[0]["Readonly"], 9d), "typed-attributes: readonly value differs.");
+
+    var writeOptions = new MiniExcelRustWriteOptions { SheetName = "Formatted" };
+    writeOptions.DynamicColumns["Count"] = new MiniExcelRustDynamicColumn
+    {
+      Name = "Formatted",
+      CustomFormatter = value => $"#{value}"
+    };
+    written = MiniExcelRust.SaveAs(
+      formatterPath,
+      new[] { new TypedAttributeExportRow("visible", "ignored", 9) },
+      writeOptions);
+    Require(written == 1, "typed-formatter: row count differs.");
+    var formatterRows = MiniExcelRust.Query(formatterPath, true, "Formatted").ToList();
+    Require(
+      formatterRows[0].ContainsKey("Formatted") && Equals(formatterRows[0]["Formatted"], "#9"),
+      "typed-formatter: formatted value differs.");
   }
   finally
   {
-    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, csvPath, attributesPath })
+    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, csvPath, attributesPath, formatterPath })
     {
       if (File.Exists(path))
         File.Delete(path);
@@ -1023,6 +1136,13 @@ static void VerifyParity(string path)
   CompareRows(managedConfiguredRows, rustConfiguredRows, "configured-query");
   Require(rustConfiguredRows.Count == 2, $"configured-query: expected 2 rows, received {rustConfiguredRows.Count}.");
 
+  managedConfiguration.FillMergedCells = true;
+  rustConfiguration.FillMergedCells = true;
+  var managedMergedRows = QueryManaged(path, true, "Options", "A1", managedConfiguration).ToList();
+  var rustMergedRows = MiniExcelRust.Query(path, true, "Options", "A1", rustConfiguration).ToList();
+  CompareRows(managedMergedRows, rustMergedRows, "merged-fill");
+  Require(rustMergedRows[0]["Right"] is null, "merged-fill: physically absent merged cell should be null.");
+
   var scenarios = new[]
   {
     new QueryScenario("header", true, "Sheet1", "A1"),
@@ -1054,6 +1174,10 @@ static void VerifyParity(string path)
   Require(
     managedAliases.Select(row => row.Label).SequenceEqual(rustAliases.Select(row => row.Label)),
     "typed-alias: values differ.");
+  var mappedFields = MiniExcelRust.Query<TypedFieldRow>(path, "Sheet1").ToList();
+  Require(
+    mappedFields[0].Label == "alpha" && Equals(mappedFields[0].Value, 42d),
+    "typed-field-index: values differ.");
 
   var typedTableRows = MiniExcelRust.QueryTable<TypedTableRow>(path, "Data", "DataTable").ToList();
   Require(
@@ -1665,6 +1789,15 @@ static void AddEntry(ZipArchive archive, string name, string contents)
     public string? Label { get; set; }
   }
 
+  internal sealed class TypedFieldRow
+  {
+    [ExcelColumnName("Name")]
+    public string? Label = null;
+
+    [ExcelColumnIndex(1)]
+    public object? Value = null;
+  }
+
   internal sealed class TypedTableRow
   {
     public string? Code { get; set; }
@@ -1731,4 +1864,26 @@ static void AddEntry(ZipArchive archive, string name, string contents)
   internal sealed class TypedMissingColumnRow
   {
     public string? Missing { get; set; }
+  }
+
+  internal sealed class TypedLocalizedRow
+  {
+    [ExcelColumnName("NameKey", ResourceType = typeof(TestLocalization))]
+    public string? Name { get; set; }
+  }
+
+  internal sealed class TypedDynamicRow
+  {
+    public Guid Label { get; set; }
+  }
+
+  internal static class TestLocalization
+  {
+    public static ResourceManager ResourceManager { get; } = new TestResourceManager();
+  }
+
+  internal sealed class TestResourceManager : ResourceManager
+  {
+    public override string? GetString(string name, CultureInfo? culture) =>
+      name == "NameKey" && culture?.Name == "zh-TW" ? "名稱" : name;
   }
