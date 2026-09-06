@@ -747,7 +747,60 @@ public static class MiniExcelRust
         }
     }
 
-    public static int[] SaveAs(
+    public static int SaveAs<T>(
+        string path,
+        IEnumerable<T> rows,
+        bool printHeader = true,
+        string sheetName = "Sheet1",
+        bool overwriteFile = false)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
+            return SaveAs(path, dynamicRows, printHeader, sheetName, overwriteFile);
+        return SaveAs(
+            path,
+            MiniExcelRustMapper.ToRows(rows),
+            printHeader,
+            sheetName,
+            overwriteFile);
+    }
+
+    public static int SaveAs<T>(
+        Stream stream,
+        IEnumerable<T> rows,
+        bool printHeader = true,
+        string sheetName = "Sheet1",
+        bool leaveOpen = false)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
+            return SaveAs(stream, dynamicRows, printHeader, sheetName, leaveOpen);
+        return SaveAs(stream, MiniExcelRustMapper.ToRows(rows), printHeader, sheetName, leaveOpen);
+    }
+
+    public static async Task<int> SaveAsAsync<T>(
+        string path,
+        IAsyncEnumerable<T> rows,
+        bool printHeader = true,
+        string sheetName = "Sheet1",
+        bool overwriteFile = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        cancellationToken.ThrowIfCancellationRequested();
+        var materialized = new List<T>();
+        await foreach (var row in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            materialized.Add(row);
+        }
+        return SaveAs(path, materialized, printHeader, sheetName, overwriteFile);
+    }
+
+    public static int[] SaveAsSheets(
         string path,
         IEnumerable<KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>> sheets,
         bool printHeader = true,
@@ -793,7 +846,7 @@ public static class MiniExcelRust
         }
     }
 
-    public static int[] SaveAs(
+    public static int[] SaveAsSheets(
         Stream stream,
         IEnumerable<KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>> sheets,
         bool printHeader = true,
@@ -803,7 +856,7 @@ public static class MiniExcelRust
         var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
         try
         {
-            var rowCounts = SaveAs(temporaryPath, sheets, printHeader);
+            var rowCounts = SaveAsSheets(temporaryPath, sheets, printHeader);
             CopyFileToStream(temporaryPath, stream);
             return rowCounts;
         }
@@ -812,6 +865,71 @@ public static class MiniExcelRust
             if (!leaveOpen)
                 stream.Dispose();
             DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
+    public static int SaveAsWithSchema(
+        string path,
+        IReadOnlyList<string> schema,
+        IEnumerable<IDictionary<string, object?>> rows,
+        MiniExcelRustWriteOptions? options = null)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (schema is null)
+            throw new ArgumentNullException(nameof(schema));
+        if (schema.Count == 0 || schema.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("The schema must contain at least one named column.", nameof(schema));
+        if (schema.Distinct(StringComparer.Ordinal).Count() != schema.Count)
+            throw new ArgumentException("Schema column names must be unique.", nameof(schema));
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        options ??= new MiniExcelRustWriteOptions();
+
+        EnsureAbiVersion();
+        var frame = EncodeRows(rows);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schema,
+            options.SheetName,
+            options.OverwriteFile,
+            options.PrintHeader,
+            options.AutoFilter,
+            options.RightToLeft,
+            options.AutoWidth,
+            options.WrapCellContents,
+            options.MinWidth,
+            options.MaxWidth,
+            options.FreezeRowCount,
+            options.FreezeColumnCount,
+            options.DateFormat,
+            options.TimeFormat,
+            options.DateTimeFormat,
+            options.DurationFormat,
+            options.ColumnFormats,
+            options.ColumnWidths,
+            options.HiddenColumns
+        }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        var payloadHandle = GCHandle.Alloc(payload, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.SaveAsConfigured(
+                nativePath.Pointer,
+                frameHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)frame.Length,
+                payloadHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)payload.Length,
+                out var rowCount);
+            if (result < 0)
+                throw CreateNativeException(result);
+            return checked((int)rowCount);
+        }
+        finally
+        {
+            payloadHandle.Free();
+            frameHandle.Free();
         }
     }
 
@@ -857,6 +975,18 @@ public static class MiniExcelRust
         return WriteCsv(path, rows, configuration, append: false);
     }
 
+    public static int SaveAsCsv<T>(
+        string path,
+        IEnumerable<T> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
+            return SaveAsCsv(path, dynamicRows, configuration);
+        return SaveAsCsv(path, MiniExcelRustMapper.ToRows(rows), configuration);
+    }
+
     /// <summary>
     /// Appends dynamic rows to a CSV file without repeating its header.
     /// </summary>
@@ -866,6 +996,16 @@ public static class MiniExcelRust
         MiniExcelRustCsvWriteOptions? configuration = null)
     {
         return WriteCsv(path, rows, configuration, append: true);
+    }
+
+    public static int AppendCsv<T>(
+        string path,
+        IEnumerable<T> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        return AppendCsv(path, MiniExcelRustMapper.ToRows(rows), configuration);
     }
 
     public static int SaveAsCsv(
@@ -2151,6 +2291,15 @@ public static class MiniExcelRust
             out IntPtr handle,
             out IntPtr resultData,
             out UIntPtr resultLength);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_save_as_configured", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SaveAsConfigured(
+            IntPtr path,
+            IntPtr data,
+            UIntPtr dataLength,
+            IntPtr optionsJson,
+            UIntPtr optionsLength,
+            out uint rowCount);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_save_csv", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern int SaveCsv(

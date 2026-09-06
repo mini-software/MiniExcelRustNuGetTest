@@ -181,8 +181,10 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifyCsvParity(csvPath);
     VerifySaveAs();
     VerifyMultiSheetSaveAs();
+    VerifyConfiguredWrite();
     VerifyCsvWrite();
     VerifyTypedConversions();
+    VerifyTypedExports();
     VerifyInsertAndCopy();
     VerifyTemplateFill();
     VerifyWorkbookMutations(workbookPath);
@@ -290,7 +292,7 @@ static void VerifyMultiSheetSaveAs()
   };
   try
   {
-    var counts = MiniExcelRust.SaveAs(path, sheets);
+    var counts = MiniExcelRust.SaveAsSheets(path, sheets);
     Require(counts.SequenceEqual(new[] { 2, 1 }), "multi-sheet-save: row counts differ.");
     Require(
       MiniExcelRust.GetSheetNames(path).SequenceEqual(new[] { "First", "Second" }, StringComparer.Ordinal),
@@ -301,18 +303,18 @@ static void VerifyMultiSheetSaveAs()
     var rejectedOverwrite = false;
     try
     {
-      MiniExcelRust.SaveAs(path, sheets);
+      MiniExcelRust.SaveAsSheets(path, sheets);
     }
     catch (InvalidOperationException)
     {
       rejectedOverwrite = true;
     }
     Require(rejectedOverwrite, "multi-sheet-save: overwrite=false should reject an existing file.");
-    counts = MiniExcelRust.SaveAs(path, sheets, overwriteFile: true);
+    counts = MiniExcelRust.SaveAsSheets(path, sheets, overwriteFile: true);
     Require(counts.SequenceEqual(new[] { 2, 1 }), "multi-sheet-save: overwrite counts differ.");
 
     using var stream = new MemoryStream();
-    counts = MiniExcelRust.SaveAs(stream, sheets, leaveOpen: true);
+    counts = MiniExcelRust.SaveAsSheets(stream, sheets, leaveOpen: true);
     Require(counts.SequenceEqual(new[] { 2, 1 }) && stream.CanWrite, "multi-sheet-stream: write failed.");
     stream.Position = 0;
     Require(
@@ -324,6 +326,59 @@ static void VerifyMultiSheetSaveAs()
     if (File.Exists(path))
       File.Delete(path);
   }
+}
+
+static void VerifyConfiguredWrite()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-configured-{Guid.NewGuid():N}.xlsx");
+  var schema = new[] { "Name", "Amount", "Secret" };
+  var rows = new[]
+  {
+    new Dictionary<string, object?> { ["Amount"] = 12.5d, ["Name"] = "alpha", ["Secret"] = "hidden" }
+  };
+  var options = new MiniExcelRustWriteOptions
+  {
+    SheetName = "Styled",
+    AutoFilter = true,
+    RightToLeft = true,
+    WrapCellContents = true,
+    FreezeRowCount = 2,
+    FreezeColumnCount = 1
+  };
+  options.ColumnFormats["Amount"] = "0.00";
+  options.ColumnWidths["Amount"] = 22;
+  options.HiddenColumns["Secret"] = true;
+  try
+  {
+    var written = MiniExcelRust.SaveAsWithSchema(path, schema, rows, options);
+    Require(written == 1, "configured-write: row count differs.");
+    var managedRows = QueryManaged(path, true, "Styled").ToList();
+    Require(managedRows[0].Keys.SequenceEqual(schema, StringComparer.Ordinal), "configured-write: schema order differs.");
+    Require(Equals(managedRows[0]["Name"], "alpha"), "configured-write: data differs.");
+
+    var worksheetXml = ReadZipEntryText(path, "xl/worksheets/sheet1.xml");
+    Require(worksheetXml.Contains("rightToLeft=\"1\"", StringComparison.Ordinal), "configured-write: RTL missing.");
+    Require(worksheetXml.Contains("xSplit=\"1\"", StringComparison.Ordinal), "configured-write: frozen column missing.");
+    Require(worksheetXml.Contains("ySplit=\"2\"", StringComparison.Ordinal), "configured-write: frozen rows missing.");
+    Require(worksheetXml.Contains("<autoFilter", StringComparison.Ordinal), "configured-write: auto filter missing.");
+    Require(worksheetXml.Contains("hidden=\"1\"", StringComparison.Ordinal), "configured-write: hidden column missing.");
+    Require(worksheetXml.Contains("width=\"22", StringComparison.Ordinal), "configured-write: column width missing.");
+    var stylesXml = ReadZipEntryText(path, "xl/styles.xml");
+    Require(stylesXml.Contains("formatCode=\"0.00\"", StringComparison.Ordinal), "configured-write: number format missing.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
+static string ReadZipEntryText(string path, string entryName)
+{
+  using var archive = ZipFile.OpenRead(path);
+  var entry = archive.GetEntry(entryName) ?? throw new InvalidDataException($"Missing ZIP entry {entryName}.");
+  using var reader = new StreamReader(entry.Open(), Encoding.UTF8);
+  return reader.ReadToEnd();
 }
 
 static void VerifyCsvWrite()
@@ -408,6 +463,89 @@ static void VerifyTypedConversions()
     if (File.Exists(path))
       File.Delete(path);
   }
+}
+
+static void VerifyTypedExports()
+{
+  var xlsxPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-export-{Guid.NewGuid():N}.xlsx");
+  var asyncPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-async-export-{Guid.NewGuid():N}.xlsx");
+  var cancelledPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-cancelled-export-{Guid.NewGuid():N}.xlsx");
+  var csvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-export-{Guid.NewGuid():N}.csv");
+  var identifier = Guid.Parse("32a2fac7-2ce2-4683-a735-118fe7c4949b");
+  var rows = new[]
+  {
+    new TypedExportRow
+    {
+      Name = "Ada",
+      Count = 7,
+      State = RowState.Ready,
+      Identifier = identifier,
+      When = new DateTime(2026, 9, 6, 8, 30, 0)
+    }
+  };
+  try
+  {
+    var written = MiniExcelRust.SaveAs(xlsxPath, rows, sheetName: "Typed");
+    Require(written == 1, "typed-export: XLSX row count differs.");
+    var managed = ManagedMiniExcel.Importers.GetOpenXmlImporter().Query<TypedExportRow>(xlsxPath, "Typed").Single();
+    var rust = MiniExcelRust.Query<TypedExportRow>(xlsxPath, "Typed").Single();
+    CompareTypedExportRows(managed, rust, "typed-export");
+
+    written = MiniExcelRust.SaveAsCsv(csvPath, rows);
+    Require(written == 1, "typed-export: CSV row count differs.");
+    var rustCsv = MiniExcelRust.QueryCsv<TypedExportRow>(csvPath).Single();
+    Require(rustCsv.Name == rows[0].Name && rustCsv.Identifier == identifier, "typed-export: CSV values differ.");
+
+    written = MiniExcelRust.SaveAsAsync(asyncPath, ProduceTypedRows(rows), sheetName: "Async")
+      .GetAwaiter()
+      .GetResult();
+    Require(written == 1, "typed-export: async row count differs.");
+    CompareTypedExportRows(rows[0], MiniExcelRust.Query<TypedExportRow>(asyncPath, "Async").Single(), "typed-async-export");
+
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    var cancelled = false;
+    try
+    {
+      _ = MiniExcelRust.SaveAsAsync(
+          cancelledPath,
+          ProduceTypedRows(rows),
+          cancellationToken: cancellation.Token)
+        .GetAwaiter()
+        .GetResult();
+    }
+    catch (OperationCanceledException)
+    {
+      cancelled = true;
+    }
+    Require(cancelled && !File.Exists(cancelledPath), "typed-export: cancellation published a destination.");
+  }
+  finally
+  {
+    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, csvPath })
+    {
+      if (File.Exists(path))
+        File.Delete(path);
+    }
+  }
+}
+
+static async IAsyncEnumerable<TypedExportRow> ProduceTypedRows(IEnumerable<TypedExportRow> rows)
+{
+  foreach (var row in rows)
+  {
+    await Task.Yield();
+    yield return row;
+  }
+}
+
+static void CompareTypedExportRows(TypedExportRow expected, TypedExportRow actual, string scenario)
+{
+  Require(expected.Name == actual.Name, $"{scenario}: name differs.");
+  Require(expected.Count == actual.Count, $"{scenario}: count differs.");
+  Require(expected.State == actual.State, $"{scenario}: state differs.");
+  Require(expected.Identifier == actual.Identifier, $"{scenario}: identifier differs.");
+  Require(expected.When == actual.When, $"{scenario}: timestamp differs.");
 }
 
 static void VerifyWorkbookMutations(string sourcePath)
@@ -1382,6 +1520,16 @@ static void AddEntry(ZipArchive archive, string name, string contents)
     public RowState State { get; set; }
     public int Count { get; set; }
     public int? Optional { get; set; }
+  }
+
+  internal sealed class TypedExportRow
+  {
+    [ExcelColumnName("Display Name")]
+    public string? Name { get; set; }
+    public int Count { get; set; }
+    public RowState State { get; set; }
+    public Guid Identifier { get; set; }
+    public DateTime When { get; set; }
   }
 
   internal enum RowState

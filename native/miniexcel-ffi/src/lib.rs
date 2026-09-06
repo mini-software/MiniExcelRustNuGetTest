@@ -802,6 +802,49 @@ pub unsafe extern "C" fn miniexcel_save_as_sheets(
     })
 }
 
+/// Creates an XLSX workbook from dynamic rows and a JSON write-options payload.
+///
+/// # Safety
+///
+/// `path`, `data`, `options_json`, and `out_row_count` must be valid for supplied lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_save_as_configured(
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    options_json: *const u8,
+    options_length: usize,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || data.is_null() || options_json.is_null() || out_row_count.is_null() {
+            set_last_error("path, data, options_json, and out_row_count are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe { ptr::write(out_row_count, 0) };
+        let path = unsafe { read_utf8(path) }?;
+        let rows = decode_rows(unsafe { std::slice::from_raw_parts(data, data_length) })?;
+        let payload: serde_json::Value = serde_json::from_slice(unsafe {
+            std::slice::from_raw_parts(options_json, options_length)
+        })
+        .map_err(|error| {
+            set_last_error(format!("invalid write-options JSON: {error}"));
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let options = configured_write_options(&payload)?;
+        if let Some(schema) = configured_schema(&payload)? {
+            MiniExcel::save_as_with_schema(path, &schema, &rows, &options)
+        } else {
+            MiniExcel::save_as_with_options(path, &rows, &options)
+        }
+        .map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        write_row_count(rows.len(), out_row_count)
+    })
+}
+
 /// Creates a CSV file from encoded dynamic rows.
 ///
 /// # Safety
@@ -1444,6 +1487,145 @@ fn decode_rows(bytes: &[u8]) -> Result<Vec<DynamicRow>, i32> {
     let rows = read_rows(&mut reader)?;
     reader.ensure_complete()?;
     Ok(rows)
+}
+
+fn configured_schema(payload: &serde_json::Value) -> Result<Option<Vec<String>>, i32> {
+    let Some(schema) = payload.get("schema") else {
+        return Ok(None);
+    };
+    let values = schema
+        .as_array()
+        .ok_or_else(|| invalid_write_options("schema must be an array"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_write_options("schema values must be strings"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn configured_write_options(payload: &serde_json::Value) -> Result<WriteOptions, i32> {
+    let mut options = WriteOptions::new()
+        .with_sheet_name(json_string(payload, "sheetName", "Sheet1")?)
+        .with_overwrite_file(json_bool(payload, "overwriteFile", false)?)
+        .with_print_header(json_bool(payload, "printHeader", true)?)
+        .with_auto_filter(json_bool(payload, "autoFilter", true)?)
+        .with_right_to_left(json_bool(payload, "rightToLeft", false)?)
+        .with_auto_width(json_bool(payload, "autoWidth", false)?)
+        .with_wrap_cell_contents(json_bool(payload, "wrapCellContents", false)?)
+        .with_min_width(json_f64(payload, "minWidth", 8.42857143)?)
+        .with_max_width(json_f64(payload, "maxWidth", 200.0)?)
+        .with_freeze_row_count(
+            json_u64(payload, "freezeRowCount", 1)?
+                .try_into()
+                .map_err(|_| invalid_write_options("freezeRowCount exceeds UInt32"))?,
+        )
+        .with_freeze_column_count(
+            json_u64(payload, "freezeColumnCount", 0)?
+                .try_into()
+                .map_err(|_| invalid_write_options("freezeColumnCount exceeds UInt16"))?,
+        );
+    for (property, setter) in [
+        ("dateFormat", 0_u8),
+        ("timeFormat", 1),
+        ("dateTimeFormat", 2),
+        ("durationFormat", 3),
+    ] {
+        if let Some(value) = payload.get(property).and_then(serde_json::Value::as_str) {
+            options = match setter {
+                0 => options.with_date_format(value),
+                1 => options.with_time_format(value),
+                2 => options.with_datetime_format(value),
+                _ => options.with_duration_format(value),
+            };
+        }
+    }
+    if let Some(values) = payload
+        .get("columnFormats")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in values {
+            options = options.with_column_format(
+                name,
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid_write_options("columnFormats values must be strings"))?,
+            );
+        }
+    }
+    if let Some(values) = payload
+        .get("columnWidths")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in values {
+            options = options.with_column_width(
+                name,
+                value
+                    .as_f64()
+                    .ok_or_else(|| invalid_write_options("columnWidths values must be numbers"))?,
+            );
+        }
+    }
+    if let Some(values) = payload
+        .get("hiddenColumns")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in values {
+            options = options.with_column_hidden(
+                name,
+                value.as_bool().ok_or_else(|| {
+                    invalid_write_options("hiddenColumns values must be booleans")
+                })?,
+            );
+        }
+    }
+    Ok(options)
+}
+
+fn json_string(payload: &serde_json::Value, name: &str, default: &str) -> Result<String, i32> {
+    match payload.get(name) {
+        None => Ok(default.to_owned()),
+        Some(value) => value
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| invalid_write_options(&format!("{name} must be a string"))),
+    }
+}
+
+fn json_bool(payload: &serde_json::Value, name: &str, default: bool) -> Result<bool, i32> {
+    match payload.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| invalid_write_options(&format!("{name} must be a boolean"))),
+    }
+}
+
+fn json_f64(payload: &serde_json::Value, name: &str, default: f64) -> Result<f64, i32> {
+    match payload.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_f64()
+            .ok_or_else(|| invalid_write_options(&format!("{name} must be a number"))),
+    }
+}
+
+fn json_u64(payload: &serde_json::Value, name: &str, default: u64) -> Result<u64, i32> {
+    match payload.get(name) {
+        None => Ok(default),
+        Some(value) => value.as_u64().ok_or_else(|| {
+            invalid_write_options(&format!("{name} must be a non-negative integer"))
+        }),
+    }
+}
+
+fn invalid_write_options(message: &str) -> i32 {
+    set_last_error(format!("invalid write options: {message}"));
+    ERROR_INVALID_ARGUMENT
 }
 
 fn decode_sheets(bytes: &[u8]) -> Result<Vec<(String, Vec<DynamicRow>)>, i32> {

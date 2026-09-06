@@ -6,6 +6,22 @@ namespace MiniExcelLibs;
 
 internal static class MiniExcelRustMapper
 {
+    public static IEnumerable<IDictionary<string, object?>> ToRows<T>(IEnumerable<T> values)
+    {
+        var mappings = CreateMappings(typeof(T))
+            .OrderBy(mapping => mapping.Index ?? int.MaxValue)
+            .ToList();
+        foreach (var value in values)
+        {
+            if (value is null)
+                throw new ArgumentException("Typed export rows cannot contain null values.", nameof(values));
+            IDictionary<string, object?> row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var mapping in mappings)
+                row.Add(mapping.Names[0], NormalizeWriteValue(mapping.GetValue(value)));
+            yield return row;
+        }
+    }
+
     public static IEnumerable<T> Map<T>(IEnumerable<IDictionary<string, object?>> rows)
         where T : class, new()
     {
@@ -47,7 +63,7 @@ internal static class MiniExcelRustMapper
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
         var members = type.GetProperties(flags)
-            .Where(property => property.SetMethod is not null)
+            .Where(property => property.SetMethod is not null && property.GetIndexParameters().Length == 0)
             .Cast<MemberInfo>()
             .Concat(type.GetFields(flags).Where(HasMiniExcelAttribute));
         return members
@@ -152,6 +168,21 @@ internal static class MiniExcelRustMapper
         return Convert.ChangeType(value, effectiveType, CultureInfo.InvariantCulture);
     }
 
+    private static object? NormalizeWriteValue(object? value)
+    {
+        if (value is null)
+            return null;
+        var type = value.GetType();
+        if (type.IsEnum)
+        {
+            var field = type.GetField(value.ToString()!);
+            return field?.GetCustomAttribute<DescriptionAttribute>()?.Description ?? value.ToString();
+        }
+        if (value is Guid or Uri)
+            return value.ToString();
+        return value;
+    }
+
     private static bool HasMiniExcelAttribute(MemberInfo member) =>
         member.CustomAttributes.Any(attribute => attribute.AttributeType.Name.IndexOf("Excel", StringComparison.Ordinal) >= 0);
 
@@ -231,6 +262,13 @@ internal static class MiniExcelRustMapper
                 property.SetValue(target, value);
             else
                 ((FieldInfo)member).SetValue(target, value);
+        }
+
+        public object? GetValue(object target)
+        {
+            return member is PropertyInfo property
+                ? property.GetValue(target)
+                : ((FieldInfo)member).GetValue(target);
         }
     }
 }
