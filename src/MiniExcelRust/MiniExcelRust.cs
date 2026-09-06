@@ -1834,6 +1834,40 @@ public static class MiniExcelRust
         }
     }
 
+    internal static void FillMappedTemplateCore(
+        string destinationPath,
+        string templatePath,
+        byte[] payload,
+        bool overwriteFile)
+    {
+        if (string.IsNullOrWhiteSpace(destinationPath))
+            throw new ArgumentException("The destination path is required.", nameof(destinationPath));
+        if (string.IsNullOrWhiteSpace(templatePath))
+            throw new ArgumentException("The template path is required.", nameof(templatePath));
+        if (payload is null)
+            throw new ArgumentNullException(nameof(payload));
+
+        EnsureAbiVersion();
+        using var nativeDestinationPath = new Utf8String(Path.GetFullPath(destinationPath));
+        using var nativeTemplatePath = new Utf8String(Path.GetFullPath(templatePath));
+        var payloadHandle = GCHandle.Alloc(payload, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.FillMappedTemplate(
+                nativeDestinationPath.Pointer,
+                nativeTemplatePath.Pointer,
+                payloadHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)payload.Length,
+                overwriteFile ? (byte)1 : (byte)0);
+            if (result < 0)
+                throw CreateNativeException(result);
+        }
+        finally
+        {
+            payloadHandle.Free();
+        }
+    }
+
     public static void FillTemplate(
         string destinationPath,
         Stream templateStream,
@@ -3111,6 +3145,14 @@ public static class MiniExcelRust
             UIntPtr jsonLength,
             byte overwriteFile,
             byte ignoreMissingVariables);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_fill_mapped_template", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int FillMappedTemplate(
+            IntPtr destinationPath,
+            IntPtr templatePath,
+            IntPtr jsonData,
+            UIntPtr jsonLength,
+            byte overwriteFile);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_merge_same_cells", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern int MergeSameCells(

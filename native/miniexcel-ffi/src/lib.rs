@@ -1548,6 +1548,42 @@ pub unsafe extern "C" fn miniexcel_fill_template(
     })
 }
 
+/// Overlays an expanded fluent-mapping cell plan onto an XLSX template.
+///
+/// # Safety
+///
+/// All string pointers must be non-null, valid, null-terminated UTF-8 for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_fill_mapped_template(
+    destination_path: *const c_char,
+    template_path: *const c_char,
+    json_data: *const u8,
+    json_length: usize,
+    overwrite_file: u8,
+) -> i32 {
+    ffi_result(|| {
+        if destination_path.is_null() || template_path.is_null() || json_data.is_null() {
+            set_last_error("destination_path, template_path, and json_data are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let destination_path = unsafe { read_utf8(destination_path) }?;
+        let template_path = unsafe { read_utf8(template_path) }?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(json_data, json_length) })
+                .map_err(|error| {
+                set_last_error(format!("invalid mapped template JSON: {error}"));
+                ERROR_INVALID_ARGUMENT
+            })?;
+        fill_mapped_template(
+            destination_path,
+            template_path,
+            &payload,
+            overwrite_file != 0,
+        )?;
+        Ok(RESULT_BATCH)
+    })
+}
+
 /// Merges tagged same-value cells into a separate XLSX destination.
 ///
 /// # Safety
@@ -2821,13 +2857,25 @@ fn read_optional_zip_entry<R: Read + std::io::Seek>(
 
 fn rewrite_package(
     path: &str,
-    mut archive: ZipArchive<File>,
+    archive: ZipArchive<File>,
     replacements: BTreeMap<String, Vec<u8>>,
 ) -> Result<(), i32> {
+    write_rewritten_package(path, archive, replacements, true)
+}
+
+fn write_rewritten_package(
+    path: &str,
+    mut archive: ZipArchive<File>,
+    replacements: BTreeMap<String, Vec<u8>>,
+    overwrite: bool,
+) -> Result<(), i32> {
     let destination = Path::new(path);
+    if destination.exists() && !overwrite {
+        return Err(write_error("the destination file already exists"));
+    }
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let mut temporary = tempfile::Builder::new()
-        .prefix(".miniexcel-picture-")
+        .prefix(".miniexcel-package-")
         .suffix(".xlsx")
         .tempfile_in(parent)
         .map_err(write_error)?;
@@ -2863,8 +2911,255 @@ fn rewrite_package(
     }
     drop(archive);
     temporary.as_file().sync_all().map_err(write_error)?;
-    let staging = temporary.into_temp_path();
-    publish_staged_file(staging.as_ref(), destination)
+    if overwrite {
+        let staging = temporary.into_temp_path();
+        publish_staged_file(staging.as_ref(), destination)
+    } else {
+        temporary
+            .persist(destination)
+            .map_err(|error| write_error(error.error))?;
+        Ok(())
+    }
+}
+
+fn fill_mapped_template(
+    destination_path: &str,
+    template_path: &str,
+    payload: &serde_json::Value,
+    overwrite: bool,
+) -> Result<(), i32> {
+    let sheet_name = payload
+        .get("sheetName")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_write_options("sheetName is required"))?;
+    let cells = payload
+        .get("cells")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_write_options("cells must be an array"))?;
+    let file = File::open(template_path).map_err(write_error)?;
+    let mut archive = ZipArchive::new(file).map_err(write_error)?;
+    let workbook = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let workbook_rels = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let relationship_id = workbook_sheets(&workbook)?
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(sheet_name))
+        .map(|(_, relationship)| relationship)
+        .ok_or_else(|| {
+            set_last_error(format!("worksheet '{sheet_name}' was not found"));
+            ERROR_QUERY
+        })?;
+    let targets = workbook_relationship_targets(&workbook_rels)?;
+    let worksheet_path =
+        normalize_workbook_target(targets.get(&relationship_id).ok_or_else(|| {
+            set_last_error(format!(
+                "workbook relationship '{relationship_id}' was not found"
+            ));
+            ERROR_QUERY
+        })?);
+    let mut worksheet =
+        String::from_utf8(read_zip_entry(&mut archive, &worksheet_path)?).map_err(write_error)?;
+    let mut ordered_cells = cells.iter().collect::<Vec<_>>();
+    ordered_cells.sort_by_key(|cell| {
+        let address = cell
+            .get("address")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        (
+            cell_row_index(address).unwrap_or(usize::MAX),
+            cell_column_index(address).unwrap_or(usize::MAX),
+        )
+    });
+    for cell in ordered_cells {
+        let address = cell
+            .get("address")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid_write_options("each mapped cell requires an address"))?;
+        let row = cell_row_index(address)?;
+        let formula = cell
+            .get("formula")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let value = cell.get("value").unwrap_or(&serde_json::Value::Null);
+        worksheet = upsert_worksheet_cell(&worksheet, address, row, value, formula)?;
+    }
+    let mut replacements = BTreeMap::new();
+    replacements.insert(worksheet_path, worksheet.into_bytes());
+    write_rewritten_package(destination_path, archive, replacements, overwrite)
+}
+
+fn upsert_worksheet_cell(
+    worksheet: &str,
+    address: &str,
+    row: usize,
+    value: &serde_json::Value,
+    formula: bool,
+) -> Result<String, i32> {
+    if let Some((start, end, style)) = find_cell_element(worksheet, address) {
+        let cell = mapped_cell_xml(address, value, formula, style.as_deref());
+        return Ok(format!(
+            "{}{}{}",
+            &worksheet[..start],
+            cell,
+            &worksheet[end..]
+        ));
+    }
+    let cell = mapped_cell_xml(address, value, formula, None);
+    if let Some((start, tag_end, end, empty)) = find_row_element(worksheet, row) {
+        if empty {
+            let start_tag = worksheet[start..tag_end - 1].trim_end_matches('/');
+            let replacement = format!("{start_tag}>{cell}</row>");
+            return Ok(format!(
+                "{}{}{}",
+                &worksheet[..start],
+                replacement,
+                &worksheet[end..]
+            ));
+        }
+        let insert_at = worksheet[start..end]
+            .rfind("</row>")
+            .map(|index| start + index)
+            .ok_or_else(|| write_error(format!("row {row} has no closing tag")))?;
+        return Ok(format!(
+            "{}{}{}",
+            &worksheet[..insert_at],
+            cell,
+            &worksheet[insert_at..]
+        ));
+    }
+    let new_row = format!("<row r=\"{row}\">{cell}</row>");
+    if let Some(insert_at) = worksheet.find("</sheetData>") {
+        return Ok(format!(
+            "{}{}{}",
+            &worksheet[..insert_at],
+            new_row,
+            &worksheet[insert_at..]
+        ));
+    }
+    if let Some(start) = worksheet.find("<sheetData") {
+        let tag_end = start
+            + worksheet[start..]
+                .find('>')
+                .ok_or_else(|| write_error("invalid sheetData element"))?
+            + 1;
+        if worksheet[start..tag_end].trim_end().ends_with("/>") {
+            return Ok(format!(
+                "{}<sheetData>{new_row}</sheetData>{}",
+                &worksheet[..start],
+                &worksheet[tag_end..]
+            ));
+        }
+    }
+    let insert_at = worksheet
+        .find("</worksheet>")
+        .ok_or_else(|| write_error("worksheet has no closing element"))?;
+    let sheet_data = format!("<sheetData>{new_row}</sheetData>");
+    Ok(format!(
+        "{}{}{}",
+        &worksheet[..insert_at],
+        sheet_data,
+        &worksheet[insert_at..]
+    ))
+}
+
+fn find_cell_element(worksheet: &str, address: &str) -> Option<(usize, usize, Option<String>)> {
+    let attribute = format!("r=\"{address}\"");
+    let mut offset = 0;
+    while let Some(relative) = worksheet[offset..].find("<c") {
+        let start = offset + relative;
+        let boundary = worksheet.as_bytes().get(start + 2).copied()?;
+        if !boundary.is_ascii_whitespace() && boundary != b'>' && boundary != b'/' {
+            offset = start + 2;
+            continue;
+        }
+        let tag_end = start + worksheet[start..].find('>')? + 1;
+        let tag = &worksheet[start..tag_end];
+        if !tag.contains(&attribute) {
+            offset = tag_end;
+            continue;
+        }
+        let style = xml_tag_attribute(tag, "s");
+        let end = if tag.trim_end().ends_with("/>") {
+            tag_end
+        } else {
+            tag_end + worksheet[tag_end..].find("</c>")? + 4
+        };
+        return Some((start, end, style));
+    }
+    None
+}
+
+fn find_row_element(worksheet: &str, row: usize) -> Option<(usize, usize, usize, bool)> {
+    let attribute = format!("r=\"{row}\"");
+    let mut offset = 0;
+    while let Some(relative) = worksheet[offset..].find("<row") {
+        let start = offset + relative;
+        let tag_end = start + worksheet[start..].find('>')? + 1;
+        let tag = &worksheet[start..tag_end];
+        if !tag.contains(&attribute) {
+            offset = tag_end;
+            continue;
+        }
+        let empty = tag.trim_end().ends_with("/>");
+        let end = if empty {
+            tag_end
+        } else {
+            tag_end + worksheet[tag_end..].find("</row>")? + 6
+        };
+        return Some((start, tag_end, end, empty));
+    }
+    None
+}
+
+fn xml_tag_attribute(tag: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=\"");
+    let start = tag.find(&prefix)? + prefix.len();
+    let end = start + tag[start..].find('"')?;
+    Some(tag[start..end].to_owned())
+}
+
+fn mapped_cell_xml(
+    address: &str,
+    value: &serde_json::Value,
+    formula: bool,
+    style: Option<&str>,
+) -> String {
+    let style = style.map_or_else(String::new, |value| format!(" s=\"{value}\""));
+    if formula {
+        let formula = value.as_str().unwrap_or_default().trim_start_matches('=');
+        return format!(
+            "<c r=\"{address}\"{style}><f>{}</f></c>",
+            xml_escape(formula)
+        );
+    }
+    match value {
+        serde_json::Value::Null => format!("<c r=\"{address}\"{style}/>"),
+        serde_json::Value::Bool(value) => format!(
+            "<c r=\"{address}\"{style} t=\"b\"><v>{}</v></c>",
+            u8::from(*value)
+        ),
+        serde_json::Value::Number(value) => {
+            format!("<c r=\"{address}\"{style}><v>{value}</v></c>")
+        }
+        value => {
+            let text = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            format!(
+                "<c r=\"{address}\"{style} t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                xml_escape(&text)
+            )
+        }
+    }
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn drawing_relationship_id(worksheet: &[u8]) -> Result<Option<String>, i32> {

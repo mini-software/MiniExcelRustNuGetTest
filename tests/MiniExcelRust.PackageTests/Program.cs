@@ -9,6 +9,8 @@ using System.Xml.Linq;
 using MiniExcelLib;
 using MiniExcelLib.Csv;
 using MiniExcelLib.OpenXml;
+using MiniExcelLib.OpenXml.FluentMapping;
+using MiniExcelLib.OpenXml.FluentMapping.Api;
 using MiniExcelLibs;
 using MiniExcelLibs.Attributes;
 using ManagedMiniExcel = MiniExcelLib.MiniExcel;
@@ -190,6 +192,7 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifyCsvWrite();
     VerifyTypedConversions();
     VerifyTypedExports();
+    VerifyFluentMapping();
     VerifyInsertAndCopy();
     VerifyTemplateFill();
     VerifyPictures();
@@ -204,6 +207,208 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
       File.Delete(workbookPath);
     if (File.Exists(csvPath))
       File.Delete(csvPath);
+  }
+}
+
+static void VerifyFluentMapping()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-{Guid.NewGuid():N}.xlsx");
+  var formulaPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-formula-{Guid.NewGuid():N}.xlsx");
+  var formulaTemplatePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-formula-template-{Guid.NewGuid():N}.xlsx");
+  var managedPath = Path.Combine(Path.GetTempPath(), $"miniexcel-managed-fluent-{Guid.NewGuid():N}.xlsx");
+  var oraclePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-oracle-{Guid.NewGuid():N}.xlsx");
+  var templatePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-template-{Guid.NewGuid():N}.xlsx");
+  var mappedTemplatePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-template-output-{Guid.NewGuid():N}.xlsx");
+  var invalidPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-fluent-invalid-{Guid.NewGuid():N}.xlsx");
+  try
+  {
+    var mapping = new MiniExcelRustMapping<MappedDepartment>().ToWorksheet("Mapped");
+    mapping.Property(value => value.Name).ToCell("A1");
+    mapping.Collection(value => value.PhoneNumbers).StartAt("A3").WithSpacing(1);
+    mapping.Collection(value => value.Projects)
+      .StartAt("C3")
+      .WithItemMapping<MappedProject>(project =>
+      {
+        project.Property(value => value.Code).ToCell("C3");
+        project.Collection(value => value.Tasks)
+          .StartAt("D3")
+          .WithItemMapping<MappedTask>(task =>
+          {
+            task.Property(value => value.Name).ToCell("D3");
+            task.Property(value => value.Hours).ToCell("E3");
+          });
+      });
+
+    var source = new[]
+    {
+      new MappedDepartment
+      {
+        Name = "Engineering",
+        PhoneNumbers = ["555-1000", "555-2000"],
+        Projects =
+        [
+          new MappedProject
+          {
+            Code = "P1",
+            Tasks = [new MappedTask { Name = "Design", Hours = 2 }, new MappedTask { Name = "Build", Hours = 5 }]
+          },
+          new MappedProject
+          {
+            Code = "P2",
+            Tasks = [new MappedTask { Name = "Test", Hours = 3 }]
+          }
+        ]
+      }
+    };
+    var written = MiniExcelRustMappingExtensions.ExportMapped(path, source, mapping);
+    Require(written == 5, $"fluent-mapping: expected 5 physical rows, received {written}.");
+    var rows = MiniExcelRust.Query(path, false, "Mapped").ToList();
+    Require(rows.Count == 5, $"fluent-mapping: expected 5 query rows, received {rows.Count}.");
+    Require(Equals(rows[0]["A"], "Engineering"), "fluent-mapping: scalar cell differs.");
+    Require(Equals(rows[2]["A"], "555-1000") && Equals(rows[4]["A"], "555-2000"), "fluent-mapping: collection spacing differs.");
+    Require(Equals(rows[2]["C"], "P1") && Equals(rows[2]["D"], "Design"), "fluent-mapping: first nested item differs.");
+    Require(Equals(rows[3]["D"], "Build") && Convert.ToInt32(rows[3]["E"], CultureInfo.InvariantCulture) == 5, "fluent-mapping: nested collection expansion differs.");
+    Require(Equals(rows[4]["C"], "P2") && Equals(rows[4]["D"], "Test"), "fluent-mapping: second parent item overlapped the first.");
+    var managedRegistry = new MappingRegistry();
+    managedRegistry.Configure<MappedDepartment>(configuration =>
+    {
+      configuration.ToWorksheet("Mapped");
+      configuration.Property(value => value.Name).ToCell("A1");
+      configuration.Collection(value => value.PhoneNumbers).StartAt("A3").WithSpacing(1);
+      configuration.Collection(value => value.Projects)
+        .StartAt("C3")
+        .WithItemMapping<MappedProject>(project =>
+        {
+          project.Property(value => value.Code).ToCell("C3");
+          project.Collection(value => value.Tasks)
+            .StartAt("D3")
+            .WithItemMapping<MappedTask>(task =>
+            {
+              task.Property(value => value.Name).ToCell("D3");
+              task.Property(value => value.Hours).ToCell("E3");
+            });
+        });
+    });
+    var oracleSource = new[]
+    {
+      new MappedDepartment
+      {
+        Name = source[0].Name,
+        PhoneNumbers = source[0].PhoneNumbers,
+        Projects = [source[0].Projects[0]]
+      }
+    };
+    ManagedMiniExcel.Exporters.GetMappingExporter(managedRegistry).Export(managedPath, oracleSource, overwriteFile: true);
+    MiniExcelRustMappingExtensions.ExportMapped(oraclePath, oracleSource, mapping);
+    CompareRows(
+      QueryManaged(managedPath, useHeaderRow: false, sheetName: "Mapped").ToList(),
+      MiniExcelRust.Query(oraclePath, false, "Mapped").ToList(),
+      "fluent-mapping-source-oracle");
+    var roundTrip = MiniExcelRustMappingExtensions.ReadMapped(path, mapping);
+    Require(roundTrip.Name == "Engineering", "fluent-mapping-read: scalar property differs.");
+    Require(roundTrip.PhoneNumbers.SequenceEqual(new[] { "555-1000", "555-2000" }), "fluent-mapping-read: simple collection differs.");
+    Require(roundTrip.Projects.Count == 2, "fluent-mapping-read: complex collection count differs.");
+    Require(roundTrip.Projects[0].Tasks.Count == 2 && roundTrip.Projects[0].Tasks[1].Name == "Build", "fluent-mapping-read: first nested collection differs.");
+    Require(roundTrip.Projects[1].Code == "P2" && roundTrip.Projects[1].Tasks.Single().Hours == 3, "fluent-mapping-read: second nested collection differs.");
+    using (var mappedStream = File.OpenRead(path))
+    {
+      var streamRoundTrip = MiniExcelRustMappingExtensions.ReadMapped(mappedStream, mapping, leaveOpen: true);
+      Require(streamRoundTrip.Projects.Count == 2 && mappedStream.CanRead, "fluent-mapping-read-stream: values or ownership differ.");
+    }
+    var asyncRoundTrip = MiniExcelRustMappingExtensions.ReadMappedAsync(path, mapping).GetAwaiter().GetResult();
+    Require(asyncRoundTrip.Projects[1].Code == "P2", "fluent-mapping-read-async: complex collection differs.");
+    using (var exportStream = new MemoryStream())
+    {
+      var streamCount = MiniExcelRustMappingExtensions.ExportMappedAsync(exportStream, source, mapping, leaveOpen: true).GetAwaiter().GetResult();
+      exportStream.Position = 0;
+      var streamRows = MiniExcelRust.Query(exportStream, false, "Mapped", leaveOpen: true).ToList();
+      Require(streamCount == 5 && Equals(streamRows[4]["C"], "P2") && exportStream.CanRead, "fluent-mapping-export-stream: values or ownership differ.");
+    }
+
+    var formulaMapping = new MiniExcelRustMapping<MappedFormula>();
+    formulaMapping.Property(value => value.Name).ToCell("A1");
+    formulaMapping.Property(value => value.Amount).ToCell("B1").WithFormat("#,##0.00");
+    formulaMapping.Property(value => value.Total).ToCell("C1").WithFormula("=B1*2");
+    formulaMapping.Property(value => value.Name).ToCell("C2");
+    MiniExcelRustMappingExtensions.ExportMapped(
+      formulaPath,
+      new[] { new MappedFormula { Name = "Line", Amount = 12.5 } },
+      formulaMapping);
+    var formulaXml = ReadZipEntryText(formulaPath, "xl/worksheets/sheet1.xml");
+    var stylesXml = ReadZipEntryText(formulaPath, "xl/styles.xml");
+    Require(formulaXml.Contains("<f>B1*2</f>", StringComparison.Ordinal), "fluent-mapping: formula cell was not written.");
+    Require(MiniExcelRust.Query(formulaPath, false).ElementAt(1)["C"]?.ToString() == "Line", "fluent-mapping: a regular cell in the formula column was changed.");
+    Require(stylesXml.Contains("#,##0.00", StringComparison.Ordinal), "fluent-mapping: number format was not written.");
+    MiniExcelRustMappingExtensions.FillMappedTemplate(
+      formulaTemplatePath,
+      formulaPath,
+      new[] { new MappedFormula { Name = "Updated", Amount = 7.5 } },
+      formulaMapping);
+    var formulaTemplateXml = ReadZipEntryText(formulaTemplatePath, "xl/worksheets/sheet1.xml");
+    Require(formulaTemplateXml.Contains("<f>B1*2</f>", StringComparison.Ordinal), "fluent-template: formula cell was not overlaid.");
+    var formulaTemplateRows = MiniExcelRust.Query(formulaTemplatePath, false).ToList();
+    Require(Equals(formulaTemplateRows[0]["A"], "Updated") && Convert.ToDouble(formulaTemplateRows[0]["B"], CultureInfo.InvariantCulture) == 7.5, "fluent-template: formula source cells differ.");
+
+    var templateRows = Enumerable.Range(1, 5)
+      .Select(index => (IDictionary<string, object?>)new Dictionary<string, object?>
+      {
+        ["A"] = index == 1 ? "Original" : null,
+        ["F"] = $"Keep-{index}"
+      })
+      .ToList();
+    var templateOptions = new MiniExcelRustWriteOptions { SheetName = "Mapped", PrintHeader = false };
+    templateOptions.ColumnFormats["A"] = "@";
+    MiniExcelRust.SaveAsWithSchema(templatePath, new[] { "A", "B", "C", "D", "E", "F" }, templateRows, templateOptions);
+    var templateDocument = XDocument.Parse(ReadZipEntryText(templatePath, "xl/worksheets/sheet1.xml"));
+    var templateStyle = templateDocument.Descendants().Single(element => element.Name.LocalName == "c" && (string?)element.Attribute("r") == "A1").Attribute("s")?.Value;
+    MiniExcelRustMappingExtensions.FillMappedTemplate(mappedTemplatePath, templatePath, source, mapping);
+    var mappedRows = MiniExcelRust.Query(mappedTemplatePath, false, "Mapped").ToList();
+    Require(Equals(mappedRows[0]["A"], "Engineering") && Equals(mappedRows[0]["F"], "Keep-1"), "fluent-template: mapped or unrelated scalar cell differs.");
+    Require(Equals(mappedRows[3]["D"], "Build") && Equals(mappedRows[4]["C"], "P2"), "fluent-template: nested collection rows differ.");
+    Require(Equals(mappedRows[4]["F"], "Keep-5"), "fluent-template: unrelated template cells were not preserved.");
+    var mappedDocument = XDocument.Parse(ReadZipEntryText(mappedTemplatePath, "xl/worksheets/sheet1.xml"));
+    var mappedStyle = mappedDocument.Descendants().Single(element => element.Name.LocalName == "c" && (string?)element.Attribute("r") == "A1").Attribute("s")?.Value;
+    Require(templateStyle is not null && mappedStyle == templateStyle, "fluent-template: existing target style was not preserved.");
+
+    using (var outputStream = new MemoryStream())
+    {
+      MiniExcelRustMappingExtensions.FillMappedTemplateAsync(outputStream, File.ReadAllBytes(templatePath), source, mapping, leaveOpen: true).GetAwaiter().GetResult();
+      outputStream.Position = 0;
+      var streamRows = MiniExcelRust.Query(outputStream, false, "Mapped", leaveOpen: true).ToList();
+      Require(Equals(streamRows[4]["C"], "P2") && outputStream.CanRead, "fluent-template-stream: values or ownership differ.");
+    }
+
+    var missingCell = new MiniExcelRustMapping<MappedFormula>();
+    missingCell.Property(value => value.Name);
+    var rejectedMissingCell = false;
+    try
+    {
+      MiniExcelRustMappingExtensions.ExportMapped(invalidPath, new[] { new MappedFormula() }, missingCell);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedMissingCell = true;
+    }
+    Require(rejectedMissingCell, "fluent-mapping: missing ToCell should fail.");
+
+    var missingStart = new MiniExcelRustMapping<MappedDepartment>();
+    missingStart.Collection(value => value.PhoneNumbers);
+    var rejectedMissingStart = false;
+    try
+    {
+      MiniExcelRustMappingExtensions.ExportMapped(invalidPath, new[] { new MappedDepartment() }, missingStart);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedMissingStart = true;
+    }
+    Require(rejectedMissingStart, "fluent-mapping: missing StartAt should fail.");
+  }
+  finally
+  {
+    foreach (var candidate in new[] { path, formulaPath, formulaTemplatePath, managedPath, oraclePath, templatePath, mappedTemplatePath, invalidPath })
+      if (File.Exists(candidate))
+        File.Delete(candidate);
   }
 }
 
@@ -2101,6 +2306,32 @@ static void AddEntry(ZipArchive archive, string name, string contents)
     public int Left { get; set; }
     public int Right { get; set; }
     public string? Formula { get; set; }
+  }
+
+  internal sealed class MappedDepartment
+  {
+    public string? Name { get; set; }
+    public List<string> PhoneNumbers { get; set; } = [];
+    public List<MappedProject> Projects { get; set; } = [];
+  }
+
+  internal sealed class MappedProject
+  {
+    public string? Code { get; set; }
+    public List<MappedTask> Tasks { get; set; } = [];
+  }
+
+  internal sealed class MappedTask
+  {
+    public string? Name { get; set; }
+    public int Hours { get; set; }
+  }
+
+  internal sealed class MappedFormula
+  {
+    public string? Name { get; set; }
+    public double Amount { get; set; }
+    public double Total { get; set; }
   }
 
   internal enum RowState

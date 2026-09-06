@@ -4,9 +4,9 @@
 [MiniExcel for Rust](https://github.com/mini-software/MiniExcel-Rust) through a small,
 versioned C ABI.
 
-> This repository and package are experimental. The current API supports Rust-backed dynamic
-> XLSX and CSV reads, including path and stream inputs, bounded ranges, named tables, workbook
-> metadata, and managed `DataTable`/`IDataReader` adapters.
+> This repository and package are experimental. The current API supports Rust-backed XLSX and
+> CSV reads and writes, bounded ranges, named tables, workbook metadata, templates, fluent
+> mapping, and managed `DataTable`/`IDataReader` adapters.
 
 ## Install
 
@@ -86,6 +86,28 @@ MiniExcelRust.FillTemplate(
     "report.xlsx",
     "template.xlsx",
     new { title = "Quarterly report", items = new[] { new { name = "Ada" } } });
+```
+
+Fluent mapping supports exact cells, formats, formulas, spaced vertical collections, and nested
+object collections. The same plan can export a workbook, read it back, or overlay values onto an
+existing template while preserving unrelated package parts and existing target-cell styles:
+
+```csharp
+var mapping = new MiniExcelRustMapping<Report>().ToWorksheet("Report");
+mapping.Property(report => report.Title).ToCell("A1");
+mapping.Collection(report => report.Items)
+    .StartAt("A3")
+    .WithSpacing(1)
+    .WithItemMapping<ReportItem>(item =>
+    {
+        item.Property(value => value.Name).ToCell("A3");
+        item.Property(value => value.Amount).ToCell("B3").WithFormat("#,##0.00");
+    });
+
+MiniExcelRustMappingExtensions.ExportMapped("report.xlsx", reports, mapping);
+var report = MiniExcelRustMappingExtensions.ReadMapped<Report>("report.xlsx", mapping);
+MiniExcelRustMappingExtensions.FillMappedTemplate(
+    "filled.xlsx", "template.xlsx", reports, mapping);
 ```
 
 Stream overloads stage input to a temporary file so the Rust engine can retain its bounded-memory

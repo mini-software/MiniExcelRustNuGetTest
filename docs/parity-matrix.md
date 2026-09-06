@@ -47,7 +47,7 @@ limits; **Missing** has no production implementation yet.
 | Templates | `MergeSameCells`, path/stream/byte[] | Verified | Merge refs, marker removal, source preservation and overwrite verified |
 | Pictures | AddPicture | Verified | PNG path/stream, OneCell/Absolute/TwoCell anchors, repeated drawing updates and package preservation verified |
 | Fluent mapping | Exact-cell reads | Verified | Rust `CellMap` path/stream dynamic and typed adapters verified |
-| Fluent mapping | Collections/write/template | Missing | Collection spacing/nesting and mapped export/template plans remain |
+| Fluent mapping | Collections/write/template | Verified | Properties, formats, per-cell formulas, vertical spacing, nested collections, path/stream/async export and read, and style-preserving mapped templates verified; defined layouts are compared with the source oracle |
 | Legacy facade | `MiniExcelLibs.MiniExcel` | Partial | Sync/async path/stream groups, ExcelType/configuration routing, object/POCO/dictionary/DataTable/DataSet writes and conversions delegate only to Rust; exact model/overload parity remains |
 
 ## Confirmed differences
