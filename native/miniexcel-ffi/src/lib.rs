@@ -741,6 +741,66 @@ pub unsafe extern "C" fn miniexcel_save_as(
     })
 }
 
+/// Creates a multi-sheet XLSX workbook from an ordered encoded sheet collection.
+///
+/// # Safety
+///
+/// `path`, `data`, and all output pointers must be valid for the supplied lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_save_as_sheets(
+    path: *const c_char,
+    data: *const u8,
+    data_length: usize,
+    print_header: u8,
+    overwrite_file: u8,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null()
+            || data.is_null()
+            || out_handle.is_null()
+            || out_data.is_null()
+            || out_length.is_null()
+        {
+            set_last_error("path, data, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+        let path = unsafe { read_utf8(path) }?;
+        let sheets = decode_sheets(unsafe { std::slice::from_raw_parts(data, data_length) })?;
+        let options = WriteOptions::new()
+            .with_print_header(print_header != 0)
+            .with_overwrite_file(overwrite_file != 0);
+        let counts = MiniExcel::save_as_sheets(
+            path,
+            sheets.iter().map(|(name, rows)| (name, rows.as_slice())),
+            &options,
+        )
+        .map_err(|error| {
+            set_last_error(error.to_string());
+            ERROR_WRITE
+        })?;
+        let mut frame = Vec::new();
+        write_length(&mut frame, counts.len())?;
+        for count in counts {
+            write_length(&mut frame, count)?;
+        }
+        let handle = Box::new(BufferHandle { frame });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
 /// Creates a CSV file from encoded dynamic rows.
 ///
 /// # Safety
@@ -1372,6 +1432,23 @@ unsafe fn write_csv(
 
 fn decode_rows(bytes: &[u8]) -> Result<Vec<DynamicRow>, i32> {
     let mut reader = FrameInput::new(bytes);
+    let rows = read_rows(&mut reader)?;
+    reader.ensure_complete()?;
+    Ok(rows)
+}
+
+fn decode_sheets(bytes: &[u8]) -> Result<Vec<(String, Vec<DynamicRow>)>, i32> {
+    let mut reader = FrameInput::new(bytes);
+    let sheet_count = reader.read_length()?;
+    let mut sheets = Vec::with_capacity(sheet_count);
+    for _ in 0..sheet_count {
+        sheets.push((reader.read_string()?, read_rows(&mut reader)?));
+    }
+    reader.ensure_complete()?;
+    Ok(sheets)
+}
+
+fn read_rows(reader: &mut FrameInput<'_>) -> Result<Vec<DynamicRow>, i32> {
     let row_count = reader.read_length()?;
     let mut rows = Vec::with_capacity(row_count);
     for _ in 0..row_count {
@@ -1394,7 +1471,6 @@ fn decode_rows(bytes: &[u8]) -> Result<Vec<DynamicRow>, i32> {
         }
         rows.push(row);
     }
-    reader.ensure_complete()?;
     Ok(rows)
 }
 

@@ -747,6 +747,74 @@ public static class MiniExcelRust
         }
     }
 
+    public static int[] SaveAs(
+        string path,
+        IEnumerable<KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>> sheets,
+        bool printHeader = true,
+        bool overwriteFile = false)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (sheets is null)
+            throw new ArgumentNullException(nameof(sheets));
+
+        EnsureAbiVersion();
+        var frame = EncodeSheets(sheets);
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.SaveAsSheets(
+                nativePath.Pointer,
+                frameHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)frame.Length,
+                printHeader ? (byte)1 : (byte)0,
+                overwriteFile ? (byte)1 : (byte)0,
+                out var rawHandle,
+                out var data,
+                out var length);
+            if (result < 0)
+                throw CreateNativeException(result);
+            using var handle = new NativeBufferHandle(rawHandle);
+            var byteLength = checked((int)length.ToUInt64());
+            var resultFrame = new byte[byteLength];
+            Marshal.Copy(data, resultFrame, 0, byteLength);
+            var reader = new FrameReader(resultFrame);
+            var count = reader.ReadLength();
+            var rowCounts = new int[count];
+            for (var index = 0; index < count; index++)
+                rowCounts[index] = reader.ReadLength();
+            reader.EnsureComplete();
+            return rowCounts;
+        }
+        finally
+        {
+            frameHandle.Free();
+        }
+    }
+
+    public static int[] SaveAs(
+        Stream stream,
+        IEnumerable<KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>> sheets,
+        bool printHeader = true,
+        bool leaveOpen = false)
+    {
+        ValidateWritableStream(stream);
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
+        try
+        {
+            var rowCounts = SaveAs(temporaryPath, sheets, printHeader);
+            CopyFileToStream(temporaryPath, stream);
+            return rowCounts;
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
     /// <summary>
     /// Creates a single-sheet XLSX workbook and copies it to a writable stream.
     /// </summary>
@@ -1546,9 +1614,36 @@ public static class MiniExcelRust
 
     private static byte[] EncodeRows(IEnumerable<IDictionary<string, object?>> rows)
     {
-        var materializedRows = rows.ToList();
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        WriteRows(writer, rows);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static byte[] EncodeSheets(
+        IEnumerable<KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>> sheets)
+    {
+        var materializedSheets = sheets.ToList();
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(checked((uint)materializedSheets.Count));
+        foreach (var sheet in materializedSheets)
+        {
+            if (string.IsNullOrWhiteSpace(sheet.Key))
+                throw new ArgumentException("Every sheet must have a name.", nameof(sheets));
+            WriteFrameString(writer, sheet.Key);
+            WriteRows(writer, sheet.Value);
+        }
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static void WriteRows(
+        BinaryWriter writer,
+        IEnumerable<IDictionary<string, object?>> rows)
+    {
+        var materializedRows = rows.ToList();
         writer.Write(checked((uint)materializedRows.Count));
         foreach (var row in materializedRows)
         {
@@ -1559,8 +1654,6 @@ public static class MiniExcelRust
                 WriteFrameValue(writer, cell.Value);
             }
         }
-        writer.Flush();
-        return stream.ToArray();
     }
 
     private static int WriteCsv(
@@ -2029,6 +2122,17 @@ public static class MiniExcelRust
             IntPtr sheetName,
             byte overwriteFile,
             out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_save_as_sheets", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SaveAsSheets(
+            IntPtr path,
+            IntPtr data,
+            UIntPtr dataLength,
+            byte printHeader,
+            byte overwriteFile,
+            out IntPtr handle,
+            out IntPtr resultData,
+            out UIntPtr resultLength);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_save_csv", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern int SaveCsv(

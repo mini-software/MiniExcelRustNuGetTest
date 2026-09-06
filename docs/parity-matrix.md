@@ -37,8 +37,9 @@ limits; **Missing** has no production implementation yet.
 | CSV metadata | Column names | Verified | Path, stream, sync and task-based async |
 | CSV adapters | DataTable/Reader | Verified | Materialized managed adapters |
 | CSV write | Dynamic save/append, path/stream | Partial | Delimiter, BOM, header, overwrite and append verified; typed and async remain |
-| XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Basic scalars and overwrite behavior verified; temporal values, schema, styles and multi-sheet remain |
-| XLSX write | Typed/async/multi-sheet export | Missing | Rust core exists; input schema/callback ABI required |
+| XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Basic scalars and overwrite behavior verified; temporal values, schema and styles remain |
+| XLSX write | Dynamic multi-sheet, path/stream | Verified | Ordered sheets, per-sheet row counts, content and overwrite verified |
+| XLSX write | Typed/async export | Missing | Rust core exists; typed input and async producer ABI required |
 | Workbook edits | Rename/reorder/visibility | Verified | Atomic path operations checked through C# and Rust metadata readers |
 | Workbook edits | Dynamic insert/copy-and-add, path | Partial | Add/reject/replace/source preservation verified; stream and complex relationship policies remain |
 | Templates | Path/stream/byte[] fill | Partial | All source/destination combinations, scalars, list expansion, strict missing variables and overwrite verified; advanced parity remains |

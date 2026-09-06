@@ -180,6 +180,7 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifyParity(workbookPath);
     VerifyCsvParity(csvPath);
     VerifySaveAs();
+    VerifyMultiSheetSaveAs();
     VerifyCsvWrite();
     VerifyTypedConversions();
     VerifyInsertAndCopy();
@@ -245,6 +246,61 @@ static void VerifySaveAs()
     var closingStream = new MemoryStream();
     MiniExcelRust.SaveAs(closingStream, rows);
     Require(!closingStream.CanWrite, "save-as-stream: the default should close the stream.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
+static void VerifyMultiSheetSaveAs()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-multisheet-{Guid.NewGuid():N}.xlsx");
+  var firstRows = new List<IDictionary<string, object?>>
+  {
+    new Dictionary<string, object?> { ["Name"] = "one", ["Value"] = 1d },
+    new Dictionary<string, object?> { ["Name"] = "two", ["Value"] = 2d }
+  };
+  var secondRows = new List<IDictionary<string, object?>>
+  {
+    new Dictionary<string, object?> { ["Code"] = "A", ["Enabled"] = true }
+  };
+  var sheets = new[]
+  {
+    new KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>("First", firstRows),
+    new KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>("Second", secondRows)
+  };
+  try
+  {
+    var counts = MiniExcelRust.SaveAs(path, sheets);
+    Require(counts.SequenceEqual(new[] { 2, 1 }), "multi-sheet-save: row counts differ.");
+    Require(
+      MiniExcelRust.GetSheetNames(path).SequenceEqual(new[] { "First", "Second" }, StringComparer.Ordinal),
+      "multi-sheet-save: sheet order differs.");
+    CompareRows(firstRows, QueryManaged(path, true, "First").ToList(), "multi-sheet-first");
+    CompareRows(secondRows, QueryManaged(path, true, "Second").ToList(), "multi-sheet-second");
+
+    var rejectedOverwrite = false;
+    try
+    {
+      MiniExcelRust.SaveAs(path, sheets);
+    }
+    catch (InvalidOperationException)
+    {
+      rejectedOverwrite = true;
+    }
+    Require(rejectedOverwrite, "multi-sheet-save: overwrite=false should reject an existing file.");
+    counts = MiniExcelRust.SaveAs(path, sheets, overwriteFile: true);
+    Require(counts.SequenceEqual(new[] { 2, 1 }), "multi-sheet-save: overwrite counts differ.");
+
+    using var stream = new MemoryStream();
+    counts = MiniExcelRust.SaveAs(stream, sheets, leaveOpen: true);
+    Require(counts.SequenceEqual(new[] { 2, 1 }) && stream.CanWrite, "multi-sheet-stream: write failed.");
+    stream.Position = 0;
+    Require(
+      MiniExcelRust.GetSheetNames(stream, leaveOpen: true).SequenceEqual(new[] { "First", "Second" }, StringComparer.Ordinal),
+      "multi-sheet-stream: sheet order differs.");
   }
   finally
   {
