@@ -84,7 +84,8 @@ public static class MiniExcelRust
         where T : class, new()
     {
         return MiniExcelRustMapper.Map<T>(
-            Query(path, !treatHeaderAsData, sheetName, startCell, configuration));
+            Query(path, !treatHeaderAsData, sheetName, startCell, configuration),
+            configuration?.Culture);
     }
 
     public static IEnumerable<T> Query<T>(
@@ -97,7 +98,8 @@ public static class MiniExcelRust
         where T : class, new()
     {
         return MiniExcelRustMapper.Map<T>(
-            Query(stream, !treatHeaderAsData, sheetName, startCell, configuration, leaveOpen));
+            Query(stream, !treatHeaderAsData, sheetName, startCell, configuration, leaveOpen),
+            configuration?.Culture);
     }
 
     public static IEnumerable<T> QueryRange<T>(
@@ -110,7 +112,8 @@ public static class MiniExcelRust
         where T : class, new()
     {
         return MiniExcelRustMapper.Map<T>(
-            QueryRange(path, !treatHeaderAsData, sheetName, startCell, endCell, configuration));
+            QueryRange(path, !treatHeaderAsData, sheetName, startCell, endCell, configuration),
+            configuration?.Culture);
     }
 
     public static IEnumerable<T> QueryTable<T>(
@@ -128,7 +131,9 @@ public static class MiniExcelRust
         MiniExcelRustCsvReadOptions? configuration = null)
         where T : class, new()
     {
-        return MiniExcelRustMapper.Map<T>(QueryCsv(path, !treatHeaderAsData, configuration));
+        return MiniExcelRustMapper.Map<T>(
+            QueryCsv(path, !treatHeaderAsData, configuration),
+            configuration?.Culture);
     }
 
     /// <summary>
@@ -333,6 +338,59 @@ public static class MiniExcelRust
         return Task.Run(() => GetSheetInformations(path), cancellationToken);
     }
 
+    public static IDictionary<string, object?> ReadMapped(
+        string path,
+        IReadOnlyDictionary<string, string> mapping,
+        string? sheetName = null)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (mapping is null || mapping.Count == 0)
+            throw new ArgumentException("At least one cell mapping is required.", nameof(mapping));
+
+        EnsureAbiVersion();
+        var mappingFrame = EncodeMapping(mapping);
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        using var nativeSheetName = new Utf8String(sheetName);
+        var mappingHandle = GCHandle.Alloc(mappingFrame, GCHandleType.Pinned);
+        try
+        {
+            var result = NativeMethods.ReadMapped(
+                nativePath.Pointer,
+                nativeSheetName.Pointer,
+                mappingHandle.AddrOfPinnedObject(),
+                (UIntPtr)(uint)mappingFrame.Length,
+                out var rawHandle,
+                out var data,
+                out var length);
+            if (result < 0)
+                throw CreateNativeException(result);
+            using var handle = new NativeBufferHandle(rawHandle);
+            var frame = new byte[checked((int)length.ToUInt64())];
+            Marshal.Copy(data, frame, 0, frame.Length);
+            return DecodeBatch(frame).Single();
+        }
+        finally
+        {
+            mappingHandle.Free();
+        }
+    }
+
+    public static T ReadMapped<T>(
+        string path,
+        IReadOnlyDictionary<string, string> mapping,
+        string? sheetName = null)
+        where T : class, new() =>
+        MiniExcelRustMapper.Map<T>(new[] { ReadMapped(path, mapping, sheetName) }).Single();
+
+    public static T ReadMapped<T>(
+        Stream stream,
+        IReadOnlyDictionary<string, string> mapping,
+        string? sheetName = null,
+        bool leaveOpen = false)
+        where T : class, new() =>
+        UseStagedStream(stream, leaveOpen, path => ReadMapped<T>(path, mapping, sheetName));
+
     /// <summary>
     /// Returns threaded comments, replies, and legacy notes from an XLSX worksheet.
     /// </summary>
@@ -428,7 +486,17 @@ public static class MiniExcelRust
         string startCell = "A1",
         MiniExcelRustReadOptions? configuration = null)
     {
-        return QueryAsDataTable(path, hasHeaderRow, sheetName, startCell, configuration).CreateDataReader();
+        if (sheetName is not null)
+            return QueryAsDataTable(path, hasHeaderRow, sheetName, startCell, configuration).CreateDataReader();
+
+        var dataSet = new DataSet();
+        foreach (var name in GetSheetNames(path))
+        {
+            var table = QueryAsDataTable(path, hasHeaderRow, name, startCell, configuration);
+            table.TableName = name;
+            dataSet.Tables.Add(table);
+        }
+        return dataSet.CreateDataReader();
     }
 
     /// <summary>
@@ -442,8 +510,10 @@ public static class MiniExcelRust
         MiniExcelRustReadOptions? configuration = null,
         bool leaveOpen = false)
     {
-        var table = QueryAsDataTable(stream, hasHeaderRow, sheetName, startCell, configuration, leaveOpen);
-        return table.CreateDataReader();
+        return UseStagedStream(
+            stream,
+            leaveOpen,
+            path => GetReader(path, hasHeaderRow, sheetName, startCell, configuration));
     }
 
     /// <summary>
@@ -713,7 +783,8 @@ public static class MiniExcelRust
         IEnumerable<IDictionary<string, object?>> rows,
         bool printHeader = true,
         string sheetName = "Sheet1",
-        bool overwriteFile = false)
+        bool overwriteFile = false,
+        IProgress<int>? progress = null)
     {
         if (string.IsNullOrWhiteSpace(path))
             throw new ArgumentException("The path is required.", nameof(path));
@@ -723,7 +794,8 @@ public static class MiniExcelRust
             throw new ArgumentException("The sheet name is required.", nameof(sheetName));
 
         EnsureAbiVersion();
-        var frame = EncodeRows(rows);
+        var materializedRows = rows.ToList();
+        var frame = EncodeRows(materializedRows);
         using var nativePath = new Utf8String(Path.GetFullPath(path));
         using var nativeSheetName = new Utf8String(sheetName);
         var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
@@ -739,6 +811,7 @@ public static class MiniExcelRust
                 out var rowCount);
             if (result < 0)
                 throw CreateNativeException(result);
+            ReportProgress(progress, materializedRows);
             return checked((int)rowCount);
         }
         finally
@@ -752,18 +825,20 @@ public static class MiniExcelRust
         IEnumerable<T> rows,
         bool printHeader = true,
         string sheetName = "Sheet1",
-        bool overwriteFile = false)
+        bool overwriteFile = false,
+        IProgress<int>? progress = null)
     {
         if (rows is null)
             throw new ArgumentNullException(nameof(rows));
         if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
-            return SaveAs(path, dynamicRows, printHeader, sheetName, overwriteFile);
+            return SaveAs(path, dynamicRows, printHeader, sheetName, overwriteFile, progress);
         return SaveAs(
             path,
             MiniExcelRustMapper.ToRows(rows),
             printHeader,
             sheetName,
-            overwriteFile);
+            overwriteFile,
+            progress);
     }
 
     public static int SaveAs<T>(
@@ -771,13 +846,14 @@ public static class MiniExcelRust
         IEnumerable<T> rows,
         bool printHeader = true,
         string sheetName = "Sheet1",
-        bool leaveOpen = false)
+        bool leaveOpen = false,
+        IProgress<int>? progress = null)
     {
         if (rows is null)
             throw new ArgumentNullException(nameof(rows));
         if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
-            return SaveAs(stream, dynamicRows, printHeader, sheetName, leaveOpen);
-        return SaveAs(stream, MiniExcelRustMapper.ToRows(rows), printHeader, sheetName, leaveOpen);
+            return SaveAs(stream, dynamicRows, printHeader, sheetName, leaveOpen, progress);
+        return SaveAs(stream, MiniExcelRustMapper.ToRows(rows), printHeader, sheetName, leaveOpen, progress);
     }
 
     public static async Task<int> SaveAsAsync<T>(
@@ -786,6 +862,7 @@ public static class MiniExcelRust
         bool printHeader = true,
         string sheetName = "Sheet1",
         bool overwriteFile = false,
+        IProgress<int>? progress = null,
         CancellationToken cancellationToken = default)
     {
         if (rows is null)
@@ -797,7 +874,7 @@ public static class MiniExcelRust
             cancellationToken.ThrowIfCancellationRequested();
             materialized.Add(row);
         }
-        return SaveAs(path, materialized, printHeader, sheetName, overwriteFile);
+        return SaveAs(path, materialized, printHeader, sheetName, overwriteFile, progress);
     }
 
     public static int[] SaveAsSheets(
@@ -898,6 +975,13 @@ public static class MiniExcelRust
             options.RightToLeft,
             options.AutoWidth,
             options.WrapCellContents,
+            horizontalAlignment = options.HorizontalAlignment.ToString().ToLowerInvariant(),
+            verticalAlignment = options.VerticalAlignment.ToString().ToLowerInvariant(),
+            tableStyle = options.TableStyle.ToString().ToLowerInvariant(),
+            options.HeaderWrapText,
+            options.HeaderBackgroundColor,
+            headerHorizontalAlignment = options.HeaderHorizontalAlignment.ToString().ToLowerInvariant(),
+            headerVerticalAlignment = options.HeaderVerticalAlignment.ToString().ToLowerInvariant(),
             options.MinWidth,
             options.MaxWidth,
             options.FreezeRowCount,
@@ -941,7 +1025,8 @@ public static class MiniExcelRust
         IEnumerable<IDictionary<string, object?>> rows,
         bool printHeader = true,
         string sheetName = "Sheet1",
-        bool leaveOpen = false)
+        bool leaveOpen = false,
+        IProgress<int>? progress = null)
     {
         if (stream is null)
             throw new ArgumentNullException(nameof(stream));
@@ -951,7 +1036,7 @@ public static class MiniExcelRust
         var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
         try
         {
-            var rowCount = SaveAs(temporaryPath, rows, printHeader, sheetName);
+            var rowCount = SaveAs(temporaryPath, rows, printHeader, sheetName, progress: progress);
             using var input = File.OpenRead(temporaryPath);
             input.CopyTo(stream);
             return rowCount;
@@ -1068,6 +1153,67 @@ public static class MiniExcelRust
                 stream.Dispose();
             DeleteTemporaryFile(temporaryPath);
         }
+    }
+
+    public static void ConvertCsvToXlsx(
+        string csvPath,
+        string xlsxPath,
+        bool csvHasHeader = false)
+    {
+        var rows = QueryCsv(csvPath, csvHasHeader);
+        SaveAs(xlsxPath, rows, csvHasHeader);
+    }
+
+    public static void ConvertCsvToXlsx(
+        Stream csvStream,
+        Stream xlsxStream,
+        bool csvHasHeader = false)
+    {
+        var rows = QueryCsv(csvStream, csvHasHeader, leaveOpen: true);
+        SaveAs(xlsxStream, rows, csvHasHeader, leaveOpen: true);
+    }
+
+    public static Task ConvertCsvToXlsxAsync(
+        string csvPath,
+        string xlsxPath,
+        bool csvHasHeader = false,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => ConvertCsvToXlsx(csvPath, xlsxPath, csvHasHeader), cancellationToken);
+    }
+
+    public static void ConvertXlsxToCsv(
+        string xlsxPath,
+        string csvPath,
+        bool xlsxHasHeader = true)
+    {
+        var rows = Query(xlsxPath, xlsxHasHeader);
+        SaveAsCsv(
+            csvPath,
+            rows,
+            new MiniExcelRustCsvWriteOptions { PrintHeader = xlsxHasHeader });
+    }
+
+    public static void ConvertXlsxToCsv(
+        Stream xlsxStream,
+        Stream csvStream,
+        bool xlsxHasHeader = true)
+    {
+        var rows = Query(xlsxStream, xlsxHasHeader, leaveOpen: true);
+        SaveAsCsv(
+            csvStream,
+            rows,
+            new MiniExcelRustCsvWriteOptions { PrintHeader = xlsxHasHeader },
+            leaveOpen: true);
+    }
+
+    public static Task ConvertXlsxToCsvAsync(
+        string xlsxPath,
+        string csvPath,
+        bool xlsxHasHeader = true,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => ConvertXlsxToCsv(xlsxPath, csvPath, xlsxHasHeader), cancellationToken);
     }
 
     public static void RenameSheet(string path, string sheetName, string newSheetName)
@@ -1761,6 +1907,35 @@ public static class MiniExcelRust
         return stream.ToArray();
     }
 
+    private static void ReportProgress(
+        IProgress<int>? progress,
+        IEnumerable<IDictionary<string, object?>> rows)
+    {
+        if (progress is null)
+            return;
+        foreach (var row in rows)
+        {
+            foreach (var _ in row)
+                progress.Report(1);
+        }
+    }
+
+    private static byte[] EncodeMapping(IReadOnlyDictionary<string, string> mapping)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(checked((uint)mapping.Count));
+        foreach (var cell in mapping)
+        {
+            if (string.IsNullOrWhiteSpace(cell.Key) || string.IsNullOrWhiteSpace(cell.Value))
+                throw new ArgumentException("Mapping field names and cell addresses are required.", nameof(mapping));
+            WriteFrameString(writer, cell.Key);
+            WriteFrameString(writer, cell.Value);
+        }
+        writer.Flush();
+        return stream.ToArray();
+    }
+
     private static byte[] EncodeSheets(
         IEnumerable<KeyValuePair<string, IEnumerable<IDictionary<string, object?>>>> sheets)
     {
@@ -2267,6 +2442,16 @@ public static class MiniExcelRust
         internal static extern int GetComments(
             IntPtr path,
             IntPtr sheetName,
+            out IntPtr handle,
+            out IntPtr data,
+            out UIntPtr length);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_read_mapped", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ReadMapped(
+            IntPtr path,
+            IntPtr sheetName,
+            IntPtr mappingData,
+            UIntPtr mappingLength,
             out IntPtr handle,
             out IntPtr data,
             out UIntPtr length);

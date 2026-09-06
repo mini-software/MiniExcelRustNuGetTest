@@ -5,6 +5,8 @@ namespace MiniExcelLibs;
 /// </summary>
 public sealed class MiniExcelRustReadOptions
 {
+    public System.Globalization.CultureInfo Culture { get; set; } = System.Globalization.CultureInfo.InvariantCulture;
+
     public bool IgnoreEmptyRows { get; set; }
 
     public bool FillMergedCells { get; set; }

@@ -178,7 +178,9 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     CreateWorkbook(workbookPath);
     File.WriteAllText(csvPath, "Name;Note\r\nalpha;\"Taiwan 台灣\"\r\nbeta;\r\n", new UTF8Encoding(true));
     VerifyParity(workbookPath);
+    VerifyCompatibilityFacade(workbookPath);
     VerifyCsvParity(csvPath);
+    VerifyConversions();
     VerifySaveAs();
     VerifyMultiSheetSaveAs();
     VerifyConfiguredWrite();
@@ -199,6 +201,76 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     if (File.Exists(csvPath))
       File.Delete(csvPath);
   }
+}
+
+static void VerifyConversions()
+{
+  var csvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-convert-{Guid.NewGuid():N}.csv");
+  var xlsxPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-convert-{Guid.NewGuid():N}.xlsx");
+  var roundtripPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-roundtrip-{Guid.NewGuid():N}.csv");
+  try
+  {
+    File.WriteAllText(csvPath, "Name,Value\r\nalpha,1\r\nbeta,2\r\n", new UTF8Encoding(true));
+    var expected = MiniExcelRust.QueryCsv(csvPath, true).ToList();
+    MiniExcelRust.ConvertCsvToXlsxAsync(csvPath, xlsxPath, true).GetAwaiter().GetResult();
+    CompareRows(expected, MiniExcelRust.Query(xlsxPath, true).ToList(), "convert-csv-xlsx");
+    MiniExcelRust.ConvertXlsxToCsvAsync(xlsxPath, roundtripPath, true).GetAwaiter().GetResult();
+    CompareRows(expected, MiniExcelRust.QueryCsv(roundtripPath, true).ToList(), "convert-xlsx-csv");
+
+    using var csvInput = new MemoryStream(File.ReadAllBytes(csvPath));
+    using var xlsxOutput = new MemoryStream();
+    MiniExcelRust.ConvertCsvToXlsx(csvInput, xlsxOutput, true);
+    Require(csvInput.CanRead && xlsxOutput.CanWrite, "convert-stream: stream ownership changed.");
+    xlsxOutput.Position = 0;
+    using var csvOutput = new MemoryStream();
+    MiniExcelRust.ConvertXlsxToCsv(xlsxOutput, csvOutput, true);
+    csvOutput.Position = 0;
+    CompareRows(expected, MiniExcelRust.QueryCsv(csvOutput, true, leaveOpen: true).ToList(), "convert-stream-roundtrip");
+  }
+  finally
+  {
+    foreach (var path in new[] { csvPath, xlsxPath, roundtripPath })
+    {
+      if (File.Exists(path))
+        File.Delete(path);
+    }
+  }
+}
+
+static void VerifyCompatibilityFacade(string path)
+{
+  var facade = typeof(MiniExcelRust).Assembly.GetType("MiniExcelLibs.MiniExcel")
+    ?? throw new InvalidOperationException("compatibility-facade: type was not found.");
+  var assembly = typeof(MiniExcelRust).Assembly;
+  var excelType = assembly.GetType("MiniExcelLibs.ExcelType")
+    ?? throw new InvalidOperationException("compatibility-facade: ExcelType was not found.");
+  var configuration = assembly.GetType("MiniExcelLibs.IConfiguration")
+    ?? throw new InvalidOperationException("compatibility-facade: IConfiguration was not found.");
+  Require(assembly.GetType("MiniExcelLibs.OpenXml.OpenXmlConfiguration") is not null, "compatibility-facade: OpenXmlConfiguration was not found.");
+  Require(assembly.GetType("MiniExcelLibs.Csv.CsvConfiguration") is not null, "compatibility-facade: CsvConfiguration was not found.");
+  Require(
+    facade.GetMethods().Any(candidate =>
+      candidate.Name == "Query" &&
+      candidate.GetParameters().Any(parameter => parameter.ParameterType == excelType) &&
+      candidate.GetParameters().Any(parameter => parameter.ParameterType == configuration)),
+    "compatibility-facade: configured Query overload was not found.");
+  var methodNames = facade.GetMethods().Select(method => method.Name).ToHashSet(StringComparer.Ordinal);
+  foreach (var required in new[]
+  {
+    "Query", "QueryAsync", "QueryRange", "QueryRangeAsync", "SaveAs", "SaveAsAsync",
+    "Insert", "SaveAsByTemplate", "MergeSameCells", "MergeSameCellsAsync", "GetReader",
+    "QueryAsDataTable", "QueryAsDataTableAsync", "GetSheetNames", "GetSheetInformations",
+    "GetSheetDimensions", "GetColumns", "GetColumnsAsync",
+    "ConvertCsvToXlsx", "ConvertCsvToXlsxAsync", "ConvertXlsxToCsv", "ConvertXlsxToCsvAsync"
+  })
+    Require(methodNames.Contains(required), $"compatibility-facade: {required} was not found.");
+  var method = facade.GetMethod("GetSheetNames", new[] { typeof(string) })
+    ?? throw new InvalidOperationException("compatibility-facade: GetSheetNames was not found.");
+  var names = (List<string>?)method.Invoke(null, new object[] { path })
+    ?? throw new InvalidOperationException("compatibility-facade: GetSheetNames returned null.");
+  Require(
+    names.SequenceEqual(new[] { "Sheet1", "Data", "Options" }, StringComparer.Ordinal),
+    "compatibility-facade: sheet names differ.");
 }
 
 static void VerifySaveAs()
@@ -229,8 +301,10 @@ static void VerifySaveAs()
   };
   try
   {
-    var written = MiniExcelRust.SaveAs(path, rows, sheetName: "Exported");
+    var progress = new CountingProgress();
+    var written = MiniExcelRust.SaveAs(path, rows, sheetName: "Exported", progress: progress);
     Require(written == rows.Count, $"save-as: expected {rows.Count} written rows, received {written}.");
+    Require(progress.Count == rows.Sum(row => row.Count), "save-as: progress count differs.");
     var managedRows = QueryManaged(path, true, "Exported").ToList();
     var rustRows = MiniExcelRust.Query(path, true, "Exported").ToList();
     CompareRows(managedRows, rustRows, "save-as-roundtrip");
@@ -245,6 +319,7 @@ static void VerifySaveAs()
       rejectedExistingFile = true;
     }
     Require(rejectedExistingFile, "save-as: overwrite=false should reject an existing file.");
+    Require(progress.Count == rows.Sum(row => row.Count), "save-as: failed write changed progress.");
 
     written = MiniExcelRust.SaveAs(path, rows, sheetName: "Exported", overwriteFile: true);
     Require(written == rows.Count, "save-as: overwrite=true did not rewrite the workbook.");
@@ -342,6 +417,13 @@ static void VerifyConfiguredWrite()
     AutoFilter = true,
     RightToLeft = true,
     WrapCellContents = true,
+    HorizontalAlignment = MiniExcelRustHorizontalAlignment.Center,
+    VerticalAlignment = MiniExcelRustVerticalAlignment.Top,
+    TableStyle = MiniExcelRustTableStyle.Default,
+    HeaderWrapText = true,
+    HeaderBackgroundColor = "2F5597",
+    HeaderHorizontalAlignment = MiniExcelRustHorizontalAlignment.Center,
+    HeaderVerticalAlignment = MiniExcelRustVerticalAlignment.Top,
     FreezeRowCount = 2,
     FreezeColumnCount = 1
   };
@@ -365,6 +447,16 @@ static void VerifyConfiguredWrite()
     Require(worksheetXml.Contains("width=\"22", StringComparison.Ordinal), "configured-write: column width missing.");
     var stylesXml = ReadZipEntryText(path, "xl/styles.xml");
     Require(stylesXml.Contains("formatCode=\"0.00\"", StringComparison.Ordinal), "configured-write: number format missing.");
+    Require(stylesXml.Contains("FF2F5597", StringComparison.Ordinal), "configured-write: header color missing.");
+    Require(stylesXml.Contains("horizontal=\"center\"", StringComparison.Ordinal), "configured-write: horizontal alignment missing.");
+    Require(stylesXml.Contains("vertical=\"top\"", StringComparison.Ordinal), "configured-write: vertical alignment missing.");
+    Require(stylesXml.Contains("wrapText=\"1\"", StringComparison.Ordinal), "configured-write: wrapping missing.");
+
+    options.TableStyle = MiniExcelRustTableStyle.None;
+    options.OverwriteFile = true;
+    MiniExcelRust.SaveAsWithSchema(path, schema, rows, options);
+    stylesXml = ReadZipEntryText(path, "xl/styles.xml");
+    Require(!stylesXml.Contains("FF2F5597", StringComparison.Ordinal), "configured-write: TableStyle.None retained header fill.");
   }
   finally
   {
@@ -441,6 +533,7 @@ static void VerifyCsvWrite()
 static void VerifyTypedConversions()
 {
   var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-{Guid.NewGuid():N}.csv");
+  var culturePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-culture-{Guid.NewGuid():N}.csv");
   var identifier = Guid.Parse("1ad46df8-08df-4ca6-8528-f79068fc23ea");
   try
   {
@@ -457,11 +550,35 @@ static void VerifyTypedConversions()
     Require(managed.State == rust.State && rust.State == RowState.Ready, "typed-conversion: enum differs.");
     Require(managed.Count == rust.Count && rust.Count == 12, "typed-conversion: integer differs.");
     Require(managed.Optional == rust.Optional && rust.Optional is null, "typed-conversion: nullable differs.");
+
+    File.WriteAllText(culturePath, "Amount;Date\r\n12,5;06.09.2026\r\n", new UTF8Encoding(true));
+    var culture = CultureInfo.GetCultureInfo("de-DE");
+    var managedCulture = new CsvConfiguration { Seperator = ';', Culture = culture };
+    var rustCulture = new MiniExcelRustCsvReadOptions { Delimiter = ';', Culture = culture };
+    var managedFormatted = importer.Query<TypedFormattedRow>(culturePath, configuration: managedCulture).Single();
+    var rustFormatted = MiniExcelRust.QueryCsv<TypedFormattedRow>(culturePath, configuration: rustCulture).Single();
+    Require(managedFormatted.Amount == rustFormatted.Amount && rustFormatted.Amount == 12.5d, "typed-culture: amount differs.");
+    Require(managedFormatted.Date == rustFormatted.Date && rustFormatted.Date == new DateTime(2026, 9, 6), "typed-format: date differs.");
+
+    MiniExcelRustColumnNotFoundException? missingColumn = null;
+    try
+    {
+      _ = MiniExcelRust.QueryCsv<TypedMissingColumnRow>(path).ToList();
+    }
+    catch (MiniExcelRustColumnNotFoundException error)
+    {
+      missingColumn = error;
+    }
+    Require(
+      missingColumn?.ColumnName == "Missing" && missingColumn.Row == 1,
+      "typed-mapping: missing-column metadata differs.");
   }
   finally
   {
     if (File.Exists(path))
       File.Delete(path);
+    if (File.Exists(culturePath))
+      File.Delete(culturePath);
   }
 }
 
@@ -471,6 +588,7 @@ static void VerifyTypedExports()
   var asyncPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-async-export-{Guid.NewGuid():N}.xlsx");
   var cancelledPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-cancelled-export-{Guid.NewGuid():N}.xlsx");
   var csvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-export-{Guid.NewGuid():N}.csv");
+  var attributesPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-attribute-export-{Guid.NewGuid():N}.xlsx");
   var identifier = Guid.Parse("32a2fac7-2ce2-4683-a735-118fe7c4949b");
   var rows = new[]
   {
@@ -519,10 +637,21 @@ static void VerifyTypedExports()
       cancelled = true;
     }
     Require(cancelled && !File.Exists(cancelledPath), "typed-export: cancellation published a destination.");
+
+    written = MiniExcelRust.SaveAs(
+      attributesPath,
+      new[] { new TypedAttributeExportRow("visible", "ignored", 9) },
+      sheetName: "Attributes");
+    Require(written == 1, "typed-attributes: row count differs.");
+    var attributeRows = MiniExcelRust.Query(attributesPath, true, "Attributes").ToList();
+    Require(
+      attributeRows[0].Keys.SequenceEqual(new[] { "Renamed", "Readonly" }, StringComparer.Ordinal),
+      "typed-attributes: exported columns differ.");
+    Require(Equals(attributeRows[0]["Readonly"], 9d), "typed-attributes: readonly value differs.");
   }
   finally
   {
-    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, csvPath })
+    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, csvPath, attributesPath })
     {
       if (File.Exists(path))
         File.Delete(path);
@@ -845,6 +974,20 @@ static void VerifyParity(string path)
   var asyncRustSheetInfo = MiniExcelRust.GetSheetInformationsAsync(path).GetAwaiter().GetResult();
   Require(asyncRustSheetInfo.Count == managedSheetInfo.Count, "sheet-info-async: sheet count differs.");
 
+  var cellMap = new Dictionary<string, string>
+  {
+    ["Name"] = "A2",
+    ["Value"] = "B2",
+    ["Note"] = "C2"
+  };
+  var mapped = MiniExcelRust.ReadMapped<TypedSheetRow>(path, cellMap, "Sheet1");
+  Require(mapped.Name == "alpha" && Equals(mapped.Value, 42d) && mapped.Note == "Taiwan 台灣", "cell-map: values differ.");
+  using (var mappedStream = File.OpenRead(path))
+  {
+    var streamMapped = MiniExcelRust.ReadMapped<TypedSheetRow>(mappedStream, cellMap, "Sheet1", leaveOpen: true);
+    Require(streamMapped.Name == mapped.Name && mappedStream.CanRead, "cell-map-stream: values or ownership differ.");
+  }
+
   var managedRangeRows = QueryManagedRange(path, true, "Data", "C2", "D3").ToList();
   var rustRangeRows = MiniExcelRust.QueryRange(path, true, "Data", "C2", "D3").ToList();
   CompareRows(managedRangeRows, rustRangeRows, "bounded-range");
@@ -948,6 +1091,16 @@ static void VerifyParity(string path)
     readerRows++;
   Require(readerRows == 3, $"data-reader: expected 3 rows, received {readerRows}.");
 
+  using var multiReader = MiniExcelRust.GetReader(path, true);
+  var resultSets = 0;
+  do
+  {
+    resultSets++;
+    while (multiReader.Read()) { }
+  }
+  while (multiReader.NextResult());
+  Require(resultSets == 3, $"data-reader: expected 3 result sets, received {resultSets}.");
+
   VerifyStreamParity(path);
 }
 
@@ -1029,6 +1182,16 @@ static void VerifyStreamParity(string path)
   {
     using var reader = MiniExcelRust.GetReader(stream, true, "Sheet1", leaveOpen: true);
     Require(reader.Read(), "stream-data-reader: expected a row.");
+    Require(stream.CanRead, "stream-data-reader: leaveOpen should preserve the stream.");
+  }
+
+  using (var stream = new MemoryStream(bytes))
+  {
+    using var reader = MiniExcelRust.GetReader(stream, true, leaveOpen: true);
+    var resultSets = 1;
+    while (reader.NextResult())
+      resultSets++;
+    Require(resultSets == 3, "stream-data-reader: result set count differs.");
     Require(stream.CanRead, "stream-data-reader: leaveOpen should preserve the stream.");
   }
 
@@ -1532,8 +1695,40 @@ static void AddEntry(ZipArchive archive, string name, string contents)
     public DateTime When { get; set; }
   }
 
+  internal sealed class TypedAttributeExportRow(string name, string ignored, int count)
+  {
+    [ExcelColumnName("Renamed")]
+    public string Name { get; set; } = name;
+
+    [ExcelIgnore]
+    public string Ignored { get; set; } = ignored;
+
+    [System.ComponentModel.DisplayName("Readonly")]
+    public int Count { get; } = count;
+  }
+
   internal enum RowState
   {
     Unknown,
     Ready
+  }
+
+  internal sealed class CountingProgress : IProgress<int>
+  {
+    public int Count { get; private set; }
+
+    public void Report(int value) => Count += value;
+  }
+
+  internal sealed class TypedFormattedRow
+  {
+    public double Amount { get; set; }
+
+    [ExcelFormat("dd.MM.yyyy")]
+    public DateTime Date { get; set; }
+  }
+
+  internal sealed class TypedMissingColumnRow
+  {
+    public string? Missing { get; set; }
   }

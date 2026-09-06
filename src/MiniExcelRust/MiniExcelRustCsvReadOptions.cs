@@ -14,6 +14,8 @@ public enum MiniExcelRustCsvEncoding : byte
 /// </summary>
 public sealed class MiniExcelRustCsvReadOptions
 {
+    public System.Globalization.CultureInfo Culture { get; set; } = System.Globalization.CultureInfo.InvariantCulture;
+
     public char Delimiter { get; set; } = ',';
 
     public MiniExcelRustCsvEncoding Encoding { get; set; } = MiniExcelRustCsvEncoding.Utf8;

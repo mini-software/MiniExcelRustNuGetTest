@@ -1,5 +1,9 @@
 namespace MiniExcelLibs;
 
+public enum MiniExcelRustHorizontalAlignment { Left, Center, Right }
+public enum MiniExcelRustVerticalAlignment { Bottom, Center, Top }
+public enum MiniExcelRustTableStyle { None, Default }
+
 /// <summary>
 /// Configures Rust-backed XLSX writes.
 /// </summary>
@@ -12,6 +16,13 @@ public sealed class MiniExcelRustWriteOptions
     public bool RightToLeft { get; set; }
     public bool AutoWidth { get; set; }
     public bool WrapCellContents { get; set; }
+    public MiniExcelRustHorizontalAlignment HorizontalAlignment { get; set; }
+    public MiniExcelRustVerticalAlignment VerticalAlignment { get; set; }
+    public MiniExcelRustTableStyle TableStyle { get; set; } = MiniExcelRustTableStyle.Default;
+    public bool HeaderWrapText { get; set; }
+    public string HeaderBackgroundColor { get; set; } = "4472C4";
+    public MiniExcelRustHorizontalAlignment HeaderHorizontalAlignment { get; set; }
+    public MiniExcelRustVerticalAlignment HeaderVerticalAlignment { get; set; }
     public double MinWidth { get; set; } = 8.42857143;
     public double MaxWidth { get; set; } = 200;
     public uint FreezeRowCount { get; set; } = 1;

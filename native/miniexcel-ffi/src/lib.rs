@@ -6,10 +6,11 @@ use std::str::FromStr;
 
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use miniexcel::{
-    CellReference, CellValue, CommentPerson, CommentTimestamp, CsvConfiguration, CsvEncoding,
-    CsvReadOptions, CsvWriteOptions, DynamicRow, ExistingSheetPolicy, HeaderMode, InsertOptions,
-    MergeSameCellsOptions, MiniExcel, ReadOptions, SheetType, SheetVisibility,
-    TargetRelationshipPolicy, TemplateOptions, WriteOptions,
+    CellMap, CellReference, CellValue, CommentPerson, CommentTimestamp, CsvConfiguration,
+    CsvEncoding, CsvReadOptions, CsvWriteOptions, DynamicRow, ExistingSheetPolicy, HeaderMode,
+    HeaderStyle, HorizontalAlignment, InsertOptions, MergeSameCellsOptions, MiniExcel, ReadOptions,
+    RgbColor, SheetType, SheetVisibility, TableStyle, TargetRelationshipPolicy, TemplateOptions,
+    VerticalAlignment, WriteOptions,
 };
 
 const ABI_VERSION: u32 = 1;
@@ -692,6 +693,110 @@ pub unsafe extern "C" fn miniexcel_get_comments(
         }
         Ok(RESULT_BATCH)
     })
+}
+
+/// Reads explicitly mapped worksheet cells into one dynamic row.
+///
+/// # Safety
+///
+/// `path`, `mapping_data`, and all output pointers must be valid for supplied lengths.
+/// `sheet_name` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_read_mapped(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    mapping_data: *const u8,
+    mapping_length: usize,
+    out_handle: *mut *mut BufferHandle,
+    out_data: *mut *const u8,
+    out_length: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null()
+            || mapping_data.is_null()
+            || out_handle.is_null()
+            || out_data.is_null()
+            || out_length.is_null()
+        {
+            set_last_error("path, mapping_data, out_handle, out_data, and out_length are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe {
+            ptr::write(out_handle, ptr::null_mut());
+            ptr::write(out_data, ptr::null());
+            ptr::write(out_length, 0);
+        }
+        let path = unsafe { read_utf8(path) }?;
+        let mut reader =
+            FrameInput::new(unsafe { std::slice::from_raw_parts(mapping_data, mapping_length) });
+        let count = reader.read_length()?;
+        let mut mapping = CellMap::new();
+        let mut fields = Vec::with_capacity(count);
+        if !sheet_name.is_null() {
+            let sheet_name = unsafe { read_utf8(sheet_name) }?;
+            if !sheet_name.is_empty() {
+                mapping = mapping.with_sheet_name(sheet_name);
+            }
+        }
+        for _ in 0..count {
+            let field = reader.read_string()?;
+            let cell = CellReference::from_str(&reader.read_string()?).map_err(|error| {
+                set_last_error(error.to_string());
+                ERROR_INVALID_ARGUMENT
+            })?;
+            mapping = mapping.with_cell(&field, cell);
+            fields.push(field);
+        }
+        reader.ensure_complete()?;
+        let mut values =
+            MiniExcel::read_mapped_as::<serde_json::Map<String, serde_json::Value>>(path, &mapping)
+                .map_err(|error| {
+                    set_last_error(error.to_string());
+                    ERROR_QUERY
+                })?;
+        let mut row = DynamicRow::with_capacity(fields.len());
+        for field in fields {
+            let value = values.remove(&field).unwrap_or(serde_json::Value::Null);
+            row.insert(field, json_value_to_cell(value)?);
+        }
+        let mut frame = Vec::new();
+        write_u32(&mut frame, 1);
+        write_row(&mut frame, &row)?;
+        let handle = Box::new(BufferHandle { frame });
+        unsafe {
+            ptr::write(out_data, handle.frame.as_ptr());
+            ptr::write(out_length, handle.frame.len());
+            ptr::write(out_handle, Box::into_raw(handle));
+        }
+        Ok(RESULT_BATCH)
+    })
+}
+
+fn json_value_to_cell(value: serde_json::Value) -> Result<CellValue, i32> {
+    match value {
+        serde_json::Value::Null => Ok(CellValue::Empty),
+        serde_json::Value::Bool(value) => Ok(CellValue::Bool(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                Ok(CellValue::Int(integer))
+            } else if let Some(unsigned) = value.as_u64() {
+                i64::try_from(unsigned).map(CellValue::Int).map_err(|_| {
+                    set_last_error("mapped unsigned integer exceeds Int64");
+                    ERROR_QUERY
+                })
+            } else {
+                value.as_f64().map(CellValue::Float).ok_or_else(|| {
+                    set_last_error("mapped JSON number is not representable");
+                    ERROR_QUERY
+                })
+            }
+        }
+        serde_json::Value::String(value) => Ok(CellValue::String(value)),
+        _ => {
+            set_last_error("mapped cell produced a non-scalar JSON value");
+            Err(ERROR_QUERY)
+        }
+    }
 }
 
 /// Creates a single-sheet XLSX workbook from encoded dynamic rows.
@@ -1528,7 +1633,42 @@ fn configured_write_options(payload: &serde_json::Value) -> Result<WriteOptions,
             json_u64(payload, "freezeColumnCount", 0)?
                 .try_into()
                 .map_err(|_| invalid_write_options("freezeColumnCount exceeds UInt16"))?,
+        )
+        .with_horizontal_alignment(parse_horizontal_alignment(json_string(
+            payload,
+            "horizontalAlignment",
+            "left",
+        )?)?)
+        .with_vertical_alignment(parse_vertical_alignment(json_string(
+            payload,
+            "verticalAlignment",
+            "bottom",
+        )?)?)
+        .with_table_style(
+            match json_string(payload, "tableStyle", "default")?.as_str() {
+                "none" => TableStyle::None,
+                "default" => TableStyle::Default,
+                _ => return Err(invalid_write_options("tableStyle must be none or default")),
+            },
         );
+    let header_style = HeaderStyle::new()
+        .with_wrap_text(json_bool(payload, "headerWrapText", false)?)
+        .with_background_color(parse_rgb_color(&json_string(
+            payload,
+            "headerBackgroundColor",
+            "4472C4",
+        )?)?)
+        .with_horizontal_alignment(parse_horizontal_alignment(json_string(
+            payload,
+            "headerHorizontalAlignment",
+            "left",
+        )?)?)
+        .with_vertical_alignment(parse_vertical_alignment(json_string(
+            payload,
+            "headerVerticalAlignment",
+            "bottom",
+        )?)?);
+    options = options.with_header_style(header_style);
     for (property, setter) in [
         ("dateFormat", 0_u8),
         ("timeFormat", 1),
@@ -1584,6 +1724,44 @@ fn configured_write_options(payload: &serde_json::Value) -> Result<WriteOptions,
         }
     }
     Ok(options)
+}
+
+fn parse_horizontal_alignment(value: String) -> Result<HorizontalAlignment, i32> {
+    match value.as_str() {
+        "left" => Ok(HorizontalAlignment::Left),
+        "center" => Ok(HorizontalAlignment::Center),
+        "right" => Ok(HorizontalAlignment::Right),
+        _ => Err(invalid_write_options(
+            "horizontal alignment must be left, center, or right",
+        )),
+    }
+}
+
+fn parse_vertical_alignment(value: String) -> Result<VerticalAlignment, i32> {
+    match value.as_str() {
+        "bottom" => Ok(VerticalAlignment::Bottom),
+        "center" => Ok(VerticalAlignment::Center),
+        "top" => Ok(VerticalAlignment::Top),
+        _ => Err(invalid_write_options(
+            "vertical alignment must be bottom, center, or top",
+        )),
+    }
+}
+
+fn parse_rgb_color(value: &str) -> Result<RgbColor, i32> {
+    let value = value.strip_prefix('#').unwrap_or(value);
+    if value.len() != 6 {
+        return Err(invalid_write_options(
+            "headerBackgroundColor must be a six-digit RGB value",
+        ));
+    }
+    let color = u32::from_str_radix(value, 16)
+        .map_err(|_| invalid_write_options("headerBackgroundColor is not valid hexadecimal"))?;
+    Ok(RgbColor::new(
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+    ))
 }
 
 fn json_string(payload: &serde_json::Value, name: &str, default: &str) -> Result<String, i32> {

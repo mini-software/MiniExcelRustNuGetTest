@@ -28,16 +28,17 @@ limits; **Missing** has no production implementation yet.
 | Metadata | Sheet dimensions | Verified | Path/stream and normal declared OOXML dimensions |
 | Metadata | Sheet information | Verified | ID, index, name, hidden state, active state and sheet type |
 | Adapters | `QueryAsDataTable` | Verified | Single selected sheet; materialized managed adapter |
-| Adapters | `GetReader` | Partial | Single selected sheet and materialized rows; no `NextResult` yet |
+| Adapters | `GetReader` | Verified | Selected/all sheets, path/stream, materialized rows and `NextResult` verified |
 | Async | Metadata tasks | Partial | Runs Rust operation on a worker; no in-flight native cancellation |
 | Async | `IAsyncEnumerable<T>` query | Partial | XLSX, typed, table and CSV enumeration plus pre-cancellation verified; in-flight native batch cancellation remains |
-| Typed read | POCO/attribute mapping | Partial | Properties, name aliases, GUID, enum, integer and nullable conversions verified; full attributes/culture/errors remain |
+| Typed read/write | POCO/attribute mapping | Partial | Properties, readonly export, rename/alias/ignore, GUID, enum, nullable, culture, ExcelFormat and missing-column errors verified; localization/dynamic mappings remain |
 | Comments | Notes/threaded comments | Verified | Path/stream, authors, timestamps, replies, resolved state and legacy notes |
 | CSV read | Dynamic query, path/stream | Verified | Header, delimiter, BOM, Unicode, quoted text and empty string |
 | CSV metadata | Column names | Verified | Path, stream, sync and task-based async |
 | CSV adapters | DataTable/Reader | Verified | Materialized managed adapters |
+| Conversion | CSV/XLSX, path/stream | Verified | Both directions, header behavior and task wrappers verified |
 | CSV write | Dynamic save/append, path/stream | Partial | Delimiter, BOM, header, overwrite and append verified; typed and async remain |
-| XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Scalars, temporal values, overwrite, explicit schema, filter/RTL/freeze/width/hidden/format verified; advanced header/alignment styles remain |
+| XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Scalars, temporal values, schema and full exposed styles verified; per-cell completion progress works, in-flight native progress remains |
 | XLSX write | Dynamic multi-sheet, path/stream | Verified | Ordered sheets, per-sheet row counts, content and overwrite verified |
 | XLSX write | Typed/async export | Partial | POCO attributes/scalars and pre-cancellation verified; producer currently materializes before native write |
 | Workbook edits | Rename/reorder/visibility | Verified | Atomic path operations checked through C# and Rust metadata readers |
@@ -46,7 +47,7 @@ limits; **Missing** has no production implementation yet.
 | Templates | `MergeSameCells`, path/stream/byte[] | Verified | Merge refs, marker removal, source preservation and overwrite verified |
 | Pictures | AddPicture | Missing | Rust core implementation required |
 | Fluent mapping | Read/write/template | Missing | Managed mapping plan plus Rust execution required |
-| Legacy facade | `MiniExcelLibs.MiniExcel` | Missing | Must be added after behavior-level APIs stabilize |
+| Legacy facade | `MiniExcelLibs.MiniExcel` | Partial | Common sync/async path/stream query, write, template, reader, metadata and conversion groups delegate only to Rust; full configuration surface remains |
 
 ## Confirmed differences
 

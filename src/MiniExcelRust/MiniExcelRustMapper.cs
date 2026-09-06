@@ -8,7 +8,7 @@ internal static class MiniExcelRustMapper
 {
     public static IEnumerable<IDictionary<string, object?>> ToRows<T>(IEnumerable<T> values)
     {
-        var mappings = CreateMappings(typeof(T))
+        var mappings = CreateMappings(typeof(T), forWrite: true)
             .OrderBy(mapping => mapping.Index ?? int.MaxValue)
             .ToList();
         foreach (var value in values)
@@ -22,10 +22,13 @@ internal static class MiniExcelRustMapper
         }
     }
 
-    public static IEnumerable<T> Map<T>(IEnumerable<IDictionary<string, object?>> rows)
+    public static IEnumerable<T> Map<T>(
+        IEnumerable<IDictionary<string, object?>> rows,
+        CultureInfo? culture = null)
         where T : class, new()
     {
-        var mappings = CreateMappings(typeof(T));
+        culture ??= CultureInfo.InvariantCulture;
+        var mappings = CreateMappings(typeof(T), forWrite: false);
         var rowIndex = 1;
         foreach (var row in rows)
         {
@@ -38,11 +41,11 @@ internal static class MiniExcelRustMapper
                     ? index >= 0 && index < values.Count && Assign(values[index], out value)
                     : TryGetValue(row, mapping.Names, out value);
                 if (!found)
-                    continue;
+                    throw new MiniExcelRustColumnNotFoundException(mapping.Names[0], rowIndex);
 
                 try
                 {
-                    mapping.SetValue(instance, ConvertValue(value, mapping.ValueType));
+                    mapping.SetValue(instance, ConvertValue(value, mapping.ValueType, mapping.Format, culture));
                 }
                 catch (Exception error) when (error is InvalidCastException or FormatException or OverflowException or ArgumentException)
                 {
@@ -59,11 +62,13 @@ internal static class MiniExcelRustMapper
         }
     }
 
-    private static IReadOnlyList<MemberMapping> CreateMappings(Type type)
+    private static IReadOnlyList<MemberMapping> CreateMappings(Type type, bool forWrite)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
         var members = type.GetProperties(flags)
-            .Where(property => property.SetMethod is not null && property.GetIndexParameters().Length == 0)
+            .Where(property =>
+                property.GetIndexParameters().Length == 0 &&
+                (forWrite ? property.GetMethod is not null : property.SetMethod is not null))
             .Cast<MemberInfo>()
             .Concat(type.GetFields(flags).Where(HasMiniExcelAttribute));
         return members
@@ -76,6 +81,7 @@ internal static class MiniExcelRustMapper
     {
         var names = new List<string> { member.Name };
         int? index = null;
+        string? format = null;
         foreach (var attribute in member.CustomAttributes)
         {
             var name = attribute.AttributeType.Name;
@@ -94,11 +100,24 @@ internal static class MiniExcelRustMapper
                 AddNamedString(attribute, "Name", names);
                 AddAliases(attribute, names);
                 index = ReadNamedInt(attribute, "Index") ?? index;
+                format = ReadNamedString(attribute, "Format") ?? format;
+            }
+            else if (name is "ExcelFormatAttribute" or "MiniExcelFormatAttribute")
+            {
+                format = attribute.ConstructorArguments.FirstOrDefault().Value as string;
             }
         }
 
+        if (member.GetCustomAttribute<DisplayNameAttribute>() is { DisplayName.Length: > 0 } display)
+            names.Insert(0, display.DisplayName);
+
         var valueType = member is PropertyInfo property ? property.PropertyType : ((FieldInfo)member).FieldType;
-        return new MemberMapping(member, names.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), index, valueType);
+        return new MemberMapping(
+            member,
+            names.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            index,
+            valueType,
+            format);
     }
 
     private static bool TryGetValue(
@@ -127,7 +146,11 @@ internal static class MiniExcelRustMapper
         return true;
     }
 
-    private static object? ConvertValue(object? value, Type targetType)
+    private static object? ConvertValue(
+        object? value,
+        Type targetType,
+        string? format,
+        CultureInfo culture)
     {
         if (value is null || value is DBNull)
         {
@@ -140,32 +163,44 @@ internal static class MiniExcelRustMapper
         if (effectiveType.IsInstanceOfType(value))
             return value;
         if (effectiveType == typeof(string))
-            return Convert.ToString(value, CultureInfo.InvariantCulture);
+            return Convert.ToString(value, culture);
         if (effectiveType == typeof(Guid))
-            return Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!);
+            return Guid.Parse(Convert.ToString(value, culture)!);
         if (effectiveType == typeof(Uri))
-            return new Uri(Convert.ToString(value, CultureInfo.InvariantCulture)!, UriKind.RelativeOrAbsolute);
+            return new Uri(Convert.ToString(value, culture)!, UriKind.RelativeOrAbsolute);
         if (effectiveType == typeof(DateTime))
-            return value is double serial ? DateTime.FromOADate(serial) : Convert.ToDateTime(value, CultureInfo.InvariantCulture);
+        {
+            if (value is double serial)
+                return DateTime.FromOADate(serial);
+            var text = Convert.ToString(value, culture)!;
+            return format is null
+                ? DateTime.Parse(text, culture)
+                : DateTime.ParseExact(text, format, CultureInfo.InvariantCulture);
+        }
         if (effectiveType == typeof(DateTimeOffset))
-            return DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+            return DateTimeOffset.Parse(Convert.ToString(value, culture)!, culture);
         if (effectiveType == typeof(TimeSpan))
-            return value is double milliseconds
-                ? TimeSpan.FromMilliseconds(milliseconds)
-                : TimeSpan.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+        {
+            if (value is double milliseconds)
+                return TimeSpan.FromMilliseconds(milliseconds);
+            var text = Convert.ToString(value, culture)!;
+            return format is null
+                ? TimeSpan.Parse(text, culture)
+                : TimeSpan.ParseExact(text, format, CultureInfo.InvariantCulture);
+        }
         if (effectiveType == typeof(bool))
         {
-            var text = Convert.ToString(value, CultureInfo.InvariantCulture);
+            var text = Convert.ToString(value, culture);
             return text switch { "1" => true, "0" => false, _ => bool.Parse(text!) };
         }
         if (effectiveType.IsEnum)
         {
-            var text = Convert.ToString(value, CultureInfo.InvariantCulture)!;
+            var text = Convert.ToString(value, culture)!;
             var described = effectiveType.GetFields()
                 .FirstOrDefault(field => field.GetCustomAttribute<DescriptionAttribute>()?.Description == text);
             return Enum.Parse(effectiveType, described?.Name ?? text, ignoreCase: true);
         }
-        return Convert.ChangeType(value, effectiveType, CultureInfo.InvariantCulture);
+        return Convert.ChangeType(value, effectiveType, culture);
     }
 
     private static object? NormalizeWriteValue(object? value)
@@ -187,8 +222,10 @@ internal static class MiniExcelRustMapper
         member.CustomAttributes.Any(attribute => attribute.AttributeType.Name.IndexOf("Excel", StringComparison.Ordinal) >= 0);
 
     private static bool IsIgnored(MemberInfo member) => member.CustomAttributes.Any(attribute =>
-        attribute.AttributeType.Name is "ExcelIgnoreAttribute" or "MiniExcelIgnoreAttribute" &&
-        (attribute.ConstructorArguments.Count == 0 || attribute.ConstructorArguments[0].Value is not false));
+        (attribute.AttributeType.Name is "ExcelIgnoreAttribute" or "MiniExcelIgnoreAttribute" &&
+         (attribute.ConstructorArguments.Count == 0 || attribute.ConstructorArguments[0].Value is not false)) ||
+        (attribute.AttributeType.Name is "ExcelColumnAttribute" or "MiniExcelColumnAttribute" &&
+         attribute.NamedArguments.Any(argument => argument.MemberName == "Ignore" && argument.TypedValue.Value is true)));
 
     private static void AddConstructorName(CustomAttributeData attribute, IList<string> names)
     {
@@ -205,6 +242,15 @@ internal static class MiniExcelRustMapper
 
     private static void AddAliases(CustomAttributeData attribute, ICollection<string> names)
     {
+        if (attribute.ConstructorArguments.Count > 1 &&
+            attribute.ConstructorArguments[1].Value is IEnumerable<CustomAttributeTypedArgument> constructorAliases)
+        {
+            foreach (var alias in constructorAliases)
+            {
+                if (alias.Value is string value && value.Length > 0)
+                    names.Add(value);
+            }
+        }
         var argument = attribute.NamedArguments.FirstOrDefault(item => item.MemberName == "Aliases");
         if (argument.TypedValue.Value is IEnumerable<CustomAttributeTypedArgument> aliases)
         {
@@ -234,6 +280,12 @@ internal static class MiniExcelRustMapper
         return argument.TypedValue.Value is int value && value >= 0 ? value : null;
     }
 
+    private static string? ReadNamedString(CustomAttributeData attribute, string propertyName)
+    {
+        var argument = attribute.NamedArguments.FirstOrDefault(item => item.MemberName == propertyName);
+        return argument.TypedValue.Value as string;
+    }
+
     private static int ColumnNameToIndex(string columnName)
     {
         var index = 0;
@@ -250,11 +302,13 @@ internal static class MiniExcelRustMapper
         MemberInfo member,
         string[] names,
         int? index,
-        Type valueType)
+        Type valueType,
+        string? format)
     {
         public string[] Names { get; } = names;
         public int? Index { get; } = index;
         public Type ValueType { get; } = valueType;
+        public string? Format { get; } = format;
 
         public void SetValue(object target, object? value)
         {
