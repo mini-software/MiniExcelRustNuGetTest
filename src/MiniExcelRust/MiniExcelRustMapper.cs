@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections;
 using System.Globalization;
 using System.Reflection;
 using System.Resources;
@@ -7,6 +8,34 @@ namespace MiniExcelLibs;
 
 internal static class MiniExcelRustMapper
 {
+    public static IEnumerable<IDictionary<string, object?>> ToRows(IEnumerable values)
+    {
+        IReadOnlyList<MemberMapping>? mappings = null;
+        Type? mappedType = null;
+        foreach (var value in values)
+        {
+            if (value is null)
+                throw new ArgumentException("Typed export rows cannot contain null values.", nameof(values));
+            if (value is IDictionary<string, object?> row)
+            {
+                yield return row;
+                continue;
+            }
+            var valueType = value.GetType();
+            if (mappedType != valueType)
+            {
+                mappedType = valueType;
+                mappings = CreateMappings(valueType, true, CultureInfo.InvariantCulture, null)
+                    .OrderBy(mapping => mapping.Index ?? int.MaxValue)
+                    .ToList();
+            }
+            IDictionary<string, object?> projected = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var mapping in mappings!)
+                projected.Add(mapping.Names[0], NormalizeWriteValue(mapping.FormatValue(mapping.GetValue(value))));
+            yield return projected;
+        }
+    }
+
     public static IEnumerable<IDictionary<string, object?>> ToRows<T>(
         IEnumerable<T> values,
         IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>? dynamicColumns = null)

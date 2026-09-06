@@ -347,6 +347,45 @@ static void VerifyCompatibilityFacade(string path)
     "ConvertCsvToXlsx", "ConvertCsvToXlsxAsync", "ConvertXlsxToCsv", "ConvertXlsxToCsvAsync"
   })
     Require(methodNames.Contains(required), $"compatibility-facade: {required} was not found.");
+  var expectedOverloadCounts = new Dictionary<string, int>(StringComparer.Ordinal)
+  {
+    ["AddPicture"] = 2,
+    ["AddPictureAsync"] = 2,
+    ["ConvertCsvToXlsx"] = 2,
+    ["ConvertCsvToXlsxAsync"] = 2,
+    ["ConvertXlsxToCsv"] = 2,
+    ["ConvertXlsxToCsvAsync"] = 2,
+    ["GetColumns"] = 2,
+    ["GetColumnsAsync"] = 2,
+    ["GetReader"] = 2,
+    ["GetSheetDimensions"] = 2,
+    ["GetSheetDimensionsAsync"] = 2,
+    ["GetSheetInformations"] = 2,
+    ["GetSheetInformationsAsync"] = 2,
+    ["GetSheetNames"] = 2,
+    ["GetSheetNamesAsync"] = 2,
+    ["Insert"] = 2,
+    ["InsertAsync"] = 2,
+    ["MergeSameCells"] = 3,
+    ["MergeSameCellsAsync"] = 3,
+    ["Query"] = 4,
+    ["QueryAsync"] = 4,
+    ["QueryRange"] = 4,
+    ["QueryRangeAsync"] = 4,
+    ["QueryAsDataTable"] = 2,
+    ["QueryAsDataTableAsync"] = 2,
+    ["SaveAs"] = 2,
+    ["SaveAsAsync"] = 2,
+    ["SaveAsByTemplate"] = 6,
+    ["SaveAsByTemplateAsync"] = 6
+  };
+  foreach (var expected in expectedOverloadCounts)
+  {
+    var actual = facade.GetMethods().Count(candidate => candidate.Name == expected.Key);
+    Require(
+      actual >= expected.Value,
+      $"compatibility-facade: {expected.Key} has {actual} overloads; baseline requires {expected.Value}.");
+  }
   var method = facade.GetMethod("GetSheetNames", new[] { typeof(string) })
     ?? throw new InvalidOperationException("compatibility-facade: GetSheetNames was not found.");
   var names = (List<string>?)method.Invoke(null, new object[] { path })
@@ -354,6 +393,39 @@ static void VerifyCompatibilityFacade(string path)
   Require(
     names.SequenceEqual(new[] { "Sheet1", "Data", "Options" }, StringComparer.Ordinal),
     "compatibility-facade: sheet names differ.");
+
+  var outputPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-facade-{Guid.NewGuid():N}.xlsx");
+  try
+  {
+    var dataSet = new DataSet();
+    var first = new DataTable("First");
+    first.Columns.Add("Name", typeof(string));
+    first.Rows.Add("one");
+    var second = new DataTable("Second");
+    second.Columns.Add("Value", typeof(double));
+    second.Rows.Add(2d);
+    dataSet.Tables.Add(first);
+    dataSet.Tables.Add(second);
+    var saveAs = facade.GetMethods().Single(candidate =>
+      candidate.Name == "SaveAs" &&
+      !candidate.IsGenericMethod &&
+      candidate.GetParameters().Length == 7 &&
+      candidate.GetParameters()[0].ParameterType == typeof(string) &&
+      candidate.GetParameters()[1].ParameterType == typeof(object));
+    var unknown = Enum.Parse(excelType, "UNKNOWN");
+    var counts = (int[]?)saveAs.Invoke(
+      null,
+      new object?[] { outputPath, dataSet, true, "Sheet1", unknown, null, false });
+    Require(counts?.SequenceEqual(new[] { 1, 1 }) is true, "compatibility-facade: DataSet counts differ.");
+    Require(
+      MiniExcelRust.GetSheetNames(outputPath).SequenceEqual(new[] { "First", "Second" }, StringComparer.Ordinal),
+      "compatibility-facade: DataSet sheet names differ.");
+  }
+  finally
+  {
+    if (File.Exists(outputPath))
+      File.Delete(outputPath);
+  }
 }
 
 static void VerifySaveAs()

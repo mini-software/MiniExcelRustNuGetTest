@@ -48,7 +48,7 @@ limits; **Missing** has no production implementation yet.
 | Pictures | AddPicture | Verified | PNG path/stream, OneCell/Absolute/TwoCell anchors, repeated drawing updates and package preservation verified |
 | Fluent mapping | Exact-cell reads | Verified | Rust `CellMap` path/stream dynamic and typed adapters verified |
 | Fluent mapping | Collections/write/template | Missing | Collection spacing/nesting and mapped export/template plans remain |
-| Legacy facade | `MiniExcelLibs.MiniExcel` | Partial | Common sync/async path/stream query, write, template, reader, metadata, conversion and ExcelType/configuration routing delegate only to Rust; exact remaining overloads stay open |
+| Legacy facade | `MiniExcelLibs.MiniExcel` | Partial | Sync/async path/stream groups, ExcelType/configuration routing, object/POCO/dictionary/DataTable/DataSet writes and conversions delegate only to Rust; exact model/overload parity remains |
 
 ## Confirmed differences
 
