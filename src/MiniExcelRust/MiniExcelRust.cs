@@ -800,6 +800,68 @@ public static class MiniExcelRust
         return WriteCsv(path, rows, configuration, append: true);
     }
 
+    public static int SaveAsCsv(
+        Stream stream,
+        IEnumerable<IDictionary<string, object?>> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null,
+        bool leaveOpen = false)
+    {
+        ValidateWritableStream(stream);
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.csv");
+        try
+        {
+            configuration ??= new MiniExcelRustCsvWriteOptions();
+            var rowCount = SaveAsCsv(
+                temporaryPath,
+                rows,
+                new MiniExcelRustCsvWriteOptions
+                {
+                    Delimiter = configuration.Delimiter,
+                    Encoding = configuration.Encoding,
+                    WriteBom = configuration.WriteBom,
+                    PrintHeader = configuration.PrintHeader,
+                    OverwriteFile = false
+                });
+            CopyFileToStream(temporaryPath, stream);
+            return rowCount;
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
+    public static int AppendCsv(
+        Stream stream,
+        IEnumerable<IDictionary<string, object?>> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null,
+        bool leaveOpen = false)
+    {
+        ValidateReadableStream(stream);
+        ValidateWritableStream(stream);
+        if (!stream.CanSeek)
+            throw new ArgumentException("The stream must be seekable for CSV append.", nameof(stream));
+
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.csv");
+        try
+        {
+            stream.Position = 0;
+            using (var output = File.Create(temporaryPath))
+                stream.CopyTo(output);
+            var rowCount = AppendCsv(temporaryPath, rows, configuration);
+            CopyFileToStream(temporaryPath, stream);
+            return rowCount;
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
     public static void RenameSheet(string path, string sheetName, string newSheetName)
     {
         ValidatePathAndSheet(path, sheetName);
@@ -958,6 +1020,96 @@ public static class MiniExcelRust
         }
     }
 
+    public static void FillTemplate(
+        string destinationPath,
+        Stream templateStream,
+        object value,
+        bool overwriteFile = false,
+        bool ignoreMissingVariables = true,
+        bool leaveTemplateOpen = false)
+    {
+        _ = UseStagedStream(templateStream, leaveTemplateOpen, templatePath =>
+        {
+            FillTemplate(destinationPath, templatePath, value, overwriteFile, ignoreMissingVariables);
+            return 0;
+        });
+    }
+
+    public static void FillTemplate(
+        string destinationPath,
+        byte[] templateBytes,
+        object value,
+        bool overwriteFile = false,
+        bool ignoreMissingVariables = true)
+    {
+        if (templateBytes is null)
+            throw new ArgumentNullException(nameof(templateBytes));
+        using var templateStream = new MemoryStream(templateBytes, writable: false);
+        FillTemplate(
+            destinationPath,
+            templateStream,
+            value,
+            overwriteFile,
+            ignoreMissingVariables,
+            leaveTemplateOpen: false);
+    }
+
+    public static void FillTemplate(
+        Stream destinationStream,
+        string templatePath,
+        object value,
+        bool ignoreMissingVariables = true,
+        bool leaveOpen = false)
+    {
+        ValidateWritableStream(destinationStream);
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
+        try
+        {
+            FillTemplate(temporaryPath, templatePath, value, false, ignoreMissingVariables);
+            CopyFileToStream(temporaryPath, destinationStream);
+        }
+        finally
+        {
+            if (!leaveOpen)
+                destinationStream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
+    public static void FillTemplate(
+        Stream destinationStream,
+        Stream templateStream,
+        object value,
+        bool ignoreMissingVariables = true,
+        bool leaveOpen = false,
+        bool leaveTemplateOpen = false)
+    {
+        _ = UseStagedStream(templateStream, leaveTemplateOpen, templatePath =>
+        {
+            FillTemplate(destinationStream, templatePath, value, ignoreMissingVariables, leaveOpen);
+            return 0;
+        });
+    }
+
+    public static void FillTemplate(
+        Stream destinationStream,
+        byte[] templateBytes,
+        object value,
+        bool ignoreMissingVariables = true,
+        bool leaveOpen = false)
+    {
+        if (templateBytes is null)
+            throw new ArgumentNullException(nameof(templateBytes));
+        using var templateStream = new MemoryStream(templateBytes, writable: false);
+        FillTemplate(
+            destinationStream,
+            templateStream,
+            value,
+            ignoreMissingVariables,
+            leaveOpen,
+            leaveTemplateOpen: false);
+    }
+
     public static void MergeSameCells(
         string destinationPath,
         string sourcePath,
@@ -977,6 +1129,67 @@ public static class MiniExcelRust
             overwriteFile ? (byte)1 : (byte)0);
         if (result < 0)
             throw CreateNativeException(result);
+    }
+
+    public static void MergeSameCells(
+        string destinationPath,
+        Stream sourceStream,
+        bool overwriteFile = false,
+        bool leaveSourceOpen = false)
+    {
+        _ = UseStagedStream(sourceStream, leaveSourceOpen, sourcePath =>
+        {
+            MergeSameCells(destinationPath, sourcePath, overwriteFile);
+            return 0;
+        });
+    }
+
+    public static void MergeSameCells(
+        Stream destinationStream,
+        string sourcePath,
+        bool leaveOpen = false)
+    {
+        ValidateWritableStream(destinationStream);
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
+        try
+        {
+            MergeSameCells(temporaryPath, sourcePath);
+            CopyFileToStream(temporaryPath, destinationStream);
+        }
+        finally
+        {
+            if (!leaveOpen)
+                destinationStream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
+    }
+
+    public static void MergeSameCells(
+        Stream destinationStream,
+        byte[] sourceBytes,
+        bool leaveOpen = false)
+    {
+        if (sourceBytes is null)
+            throw new ArgumentNullException(nameof(sourceBytes));
+        using var sourceStream = new MemoryStream(sourceBytes, writable: false);
+        _ = UseStagedStream(sourceStream, false, sourcePath =>
+        {
+            MergeSameCells(destinationStream, sourcePath, leaveOpen);
+            return 0;
+        });
+    }
+
+    public static void MergeSameCells(
+        Stream destinationStream,
+        Stream sourceStream,
+        bool leaveOpen = false,
+        bool leaveSourceOpen = false)
+    {
+        _ = UseStagedStream(sourceStream, leaveSourceOpen, sourcePath =>
+        {
+            MergeSameCells(destinationStream, sourcePath, leaveOpen);
+            return 0;
+        });
     }
 
     private static IEnumerable<IDictionary<string, object?>> QueryStreamIterator(
@@ -1482,6 +1695,25 @@ public static class MiniExcelRust
             throw new ArgumentNullException(nameof(stream));
         if (!stream.CanRead)
             throw new ArgumentException("The stream must be readable.", nameof(stream));
+    }
+
+    private static void ValidateWritableStream(Stream stream)
+    {
+        if (stream is null)
+            throw new ArgumentNullException(nameof(stream));
+        if (!stream.CanWrite)
+            throw new ArgumentException("The stream must be writable.", nameof(stream));
+    }
+
+    private static void CopyFileToStream(string path, Stream destination)
+    {
+        if (destination.CanSeek)
+        {
+            destination.Position = 0;
+            destination.SetLength(0);
+        }
+        using var input = File.OpenRead(path);
+        input.CopyTo(destination);
     }
 
     private static void ValidateCsvConfiguration(MiniExcelRustCsvReadOptions? configuration)

@@ -36,13 +36,13 @@ limits; **Missing** has no production implementation yet.
 | CSV read | Dynamic query, path/stream | Verified | Header, delimiter, BOM, Unicode, quoted text and empty string |
 | CSV metadata | Column names | Verified | Path, stream, sync and task-based async |
 | CSV adapters | DataTable/Reader | Verified | Materialized managed adapters |
-| CSV write | Dynamic save/append, path | Partial | Delimiter, BOM, header, overwrite and append verified; stream, typed and async remain |
+| CSV write | Dynamic save/append, path/stream | Partial | Delimiter, BOM, header, overwrite and append verified; typed and async remain |
 | XLSX write | Dynamic single-sheet `SaveAs`, path/stream | Partial | Basic scalars and overwrite behavior verified; temporal values, schema, styles and multi-sheet remain |
 | XLSX write | Typed/async/multi-sheet export | Missing | Rust core exists; input schema/callback ABI required |
 | Workbook edits | Rename/reorder/visibility | Verified | Atomic path operations checked through C# and Rust metadata readers |
 | Workbook edits | Dynamic insert/copy-and-add, path | Partial | Add/reject/replace/source preservation verified; stream and complex relationship policies remain |
-| Templates | Path-to-path fill | Partial | Scalars, list expansion, strict missing variables and overwrite verified; stream/bytes combinations remain |
-| Templates | `MergeSameCells`, path | Verified | Merge refs, marker removal, source preservation and overwrite verified |
+| Templates | Path/stream/byte[] fill | Partial | All source/destination combinations, scalars, list expansion, strict missing variables and overwrite verified; advanced parity remains |
+| Templates | `MergeSameCells`, path/stream/byte[] | Verified | Merge refs, marker removal, source preservation and overwrite verified |
 | Pictures | AddPicture | Missing | Rust core implementation required |
 | Fluent mapping | Read/write/template | Missing | Managed mapping plan plus Rust execution required |
 | Legacy facade | `MiniExcelLibs.MiniExcel` | Missing | Must be added after behavior-level APIs stabilize |

@@ -60,6 +60,14 @@ static int VerifyMergeSameCells(string[] arguments)
     }
     Require(rejectedOverwrite, "merge-same-cells: overwrite=false should reject an existing destination.");
     MiniExcelRust.MergeSameCells(destinationPath, sourcePath, overwriteFile: true);
+
+    using var outputStream = new MemoryStream();
+    MiniExcelRust.MergeSameCells(outputStream, File.ReadAllBytes(sourcePath), leaveOpen: true);
+    Require(outputStream.CanWrite, "merge-same-cells-stream: leaveOpen should preserve the stream.");
+    outputStream.Position = 0;
+    Require(
+      ReadMergeReferencesFromStream(outputStream).SequenceEqual(new[] { "A2:A4", "C3:C4", "A7:A8" }, StringComparer.Ordinal),
+      "merge-same-cells-stream: generated ranges differ.");
     Console.WriteLine("Verified merge-same-cells output and source preservation.");
     return 0;
   }
@@ -72,11 +80,17 @@ static int VerifyMergeSameCells(string[] arguments)
 
 static List<string> ReadMergeReferences(string path)
 {
-  using var archive = ZipFile.OpenRead(path);
+  using var stream = File.OpenRead(path);
+  return ReadMergeReferencesFromStream(stream);
+}
+
+static List<string> ReadMergeReferencesFromStream(Stream stream)
+{
+  using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
   var entry = archive.GetEntry("xl/worksheets/sheet1.xml")
     ?? throw new InvalidDataException("The workbook has no first worksheet.");
-  using var stream = entry.Open();
-  var document = XDocument.Load(stream);
+  using var entryStream = entry.Open();
+  var document = XDocument.Load(entryStream);
   XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
   return document.Descendants(spreadsheet + "mergeCell")
     .Select(element => (string?)element.Attribute("ref") ?? string.Empty)
@@ -279,6 +293,15 @@ static void VerifyCsvWrite()
     var rustRows = MiniExcelRust.QueryCsv(path, true, readOptions).ToList();
     CompareRows(managedRows, rustRows, "csv-write-roundtrip");
     Require(rustRows.Count == 3, $"csv-write-roundtrip: expected 3 rows, received {rustRows.Count}.");
+
+    using var stream = new MemoryStream();
+    written = MiniExcelRust.SaveAsCsv(stream, initialRows, writeOptions, leaveOpen: true);
+    Require(written == initialRows.Count && stream.CanWrite, "csv-write-stream: initial write failed.");
+    written = MiniExcelRust.AppendCsv(stream, appendedRows, writeOptions, leaveOpen: true);
+    Require(written == appendedRows.Count && stream.CanWrite, "csv-append-stream: append failed.");
+    stream.Position = 0;
+    var streamRows = MiniExcelRust.QueryCsv(stream, true, readOptions, leaveOpen: true).ToList();
+    CompareRows(rustRows, streamRows, "csv-write-stream-roundtrip");
   }
   finally
   {
@@ -406,6 +429,8 @@ static void VerifyTemplateFill()
   var templatePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-{Guid.NewGuid():N}.xlsx");
   var managedPath = Path.Combine(Path.GetTempPath(), $"miniexcel-managed-template-{Guid.NewGuid():N}.xlsx");
   var rustPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-output-{Guid.NewGuid():N}.xlsx");
+  var bytesPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-bytes-{Guid.NewGuid():N}.xlsx");
+  var streamTemplatePath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-stream-{Guid.NewGuid():N}.xlsx");
   var strictPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-template-strict-{Guid.NewGuid():N}.xlsx");
   try
   {
@@ -426,10 +451,48 @@ static void VerifyTemplateFill()
 
     ManagedMiniExcel.Templaters.GetOpenXmlTemplater().FillTemplate(managedPath, templatePath, value);
     MiniExcelRust.FillTemplate(rustPath, templatePath, value);
-    CompareRows(
-      QueryManaged(managedPath, false).ToList(),
-      MiniExcelRust.Query(rustPath).ToList(),
-      "template-fill");
+    var expectedRows = QueryManaged(managedPath, false).ToList();
+    CompareRows(expectedRows, MiniExcelRust.Query(rustPath).ToList(), "template-fill");
+
+    var templateBytes = File.ReadAllBytes(templatePath);
+    MiniExcelRust.FillTemplate(bytesPath, templateBytes, value);
+    CompareRows(expectedRows, MiniExcelRust.Query(bytesPath).ToList(), "template-fill-bytes");
+
+    using (var templateStream = new MemoryStream(templateBytes))
+    {
+      MiniExcelRust.FillTemplate(streamTemplatePath, templateStream, value, leaveTemplateOpen: true);
+      Require(templateStream.CanRead, "template-stream: leaveTemplateOpen should preserve the stream.");
+      CompareRows(expectedRows, MiniExcelRust.Query(streamTemplatePath).ToList(), "template-fill-template-stream");
+    }
+
+    using (var outputStream = new MemoryStream())
+    {
+      MiniExcelRust.FillTemplate(outputStream, templatePath, value, leaveOpen: true);
+      Require(outputStream.CanWrite, "template-output-stream: leaveOpen should preserve the stream.");
+      outputStream.Position = 0;
+      CompareRows(expectedRows, MiniExcelRust.Query(outputStream).ToList(), "template-fill-output-stream");
+    }
+
+    using (var outputStream = new MemoryStream())
+    using (var templateStream = new MemoryStream(templateBytes))
+    {
+      MiniExcelRust.FillTemplate(
+        outputStream,
+        templateStream,
+        value,
+        leaveOpen: true,
+        leaveTemplateOpen: true);
+      Require(outputStream.CanWrite && templateStream.CanRead, "template-streams: leave-open contract failed.");
+      outputStream.Position = 0;
+      CompareRows(expectedRows, MiniExcelRust.Query(outputStream).ToList(), "template-fill-streams");
+    }
+
+    using (var outputStream = new MemoryStream())
+    {
+      MiniExcelRust.FillTemplate(outputStream, templateBytes, value, leaveOpen: true);
+      outputStream.Position = 0;
+      CompareRows(expectedRows, MiniExcelRust.Query(outputStream).ToList(), "template-fill-byte-stream");
+    }
 
     var rejectedOverwrite = false;
     try
@@ -455,7 +518,7 @@ static void VerifyTemplateFill()
   }
   finally
   {
-    foreach (var path in new[] { templatePath, managedPath, rustPath, strictPath })
+    foreach (var path in new[] { templatePath, managedPath, rustPath, bytesPath, streamTemplatePath, strictPath })
     {
       if (File.Exists(path))
         File.Delete(path);
