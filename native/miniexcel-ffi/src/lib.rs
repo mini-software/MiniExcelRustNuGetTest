@@ -4,6 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::str::FromStr;
 
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use miniexcel::{
     CellReference, CellValue, CommentPerson, CommentTimestamp, CsvConfiguration, CsvEncoding,
     CsvReadOptions, CsvWriteOptions, DynamicRow, ExistingSheetPolicy, HeaderMode, InsertOptions,
@@ -1281,11 +1282,19 @@ fn write_row(frame: &mut Vec<u8>, row: &DynamicRow) -> Result<(), i32> {
             }
             CellValue::DateTime(value) => {
                 frame.push(7);
+                let value = if value.date()
+                    == NaiveDate::from_ymd_opt(1899, 12, 31).expect("valid Excel epoch date")
+                {
+                    *value - Duration::days(1)
+                } else {
+                    *value
+                };
                 write_string(frame, value.format("%Y-%m-%dT%H:%M:%S%.f").to_string())?;
             }
             CellValue::Duration(value) => {
-                frame.push(8);
-                frame.extend_from_slice(&value.num_milliseconds().to_le_bytes());
+                frame.push(3);
+                let excel_days = value.num_milliseconds() as f64 / 86_400_000_f64;
+                frame.extend_from_slice(&excel_days.to_le_bytes());
             }
             CellValue::Error(value) => {
                 frame.push(9);
@@ -1462,6 +1471,20 @@ fn read_rows(reader: &mut FrameInput<'_>) -> Result<Vec<DynamicRow>, i32> {
                 2 => CellValue::Int(reader.read_i64()?),
                 3 => CellValue::Float(f64::from_bits(reader.read_u64()?)),
                 4 => CellValue::String(reader.read_string()?),
+                5 => CellValue::Date(
+                    NaiveDate::parse_from_str(&reader.read_string()?, "%Y-%m-%d")
+                        .map_err(invalid_frame_value)?,
+                ),
+                6 => CellValue::Time(
+                    NaiveTime::parse_from_str(&reader.read_string()?, "%H:%M:%S%.f")
+                        .map_err(invalid_frame_value)?,
+                ),
+                7 => CellValue::DateTime(
+                    NaiveDateTime::parse_from_str(&reader.read_string()?, "%Y-%m-%dT%H:%M:%S%.f")
+                        .map_err(invalid_frame_value)?,
+                ),
+                8 => CellValue::Duration(Duration::milliseconds(reader.read_i64()?)),
+                9 => CellValue::Error(reader.read_string()?),
                 tag => {
                     set_last_error(format!("input frame contains unsupported value tag {tag}"));
                     return Err(ERROR_INVALID_ARGUMENT);
@@ -1472,6 +1495,13 @@ fn read_rows(reader: &mut FrameInput<'_>) -> Result<Vec<DynamicRow>, i32> {
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn invalid_frame_value(error: chrono::ParseError) -> i32 {
+    set_last_error(format!(
+        "input frame contains an invalid temporal value: {error}"
+    ));
+    ERROR_INVALID_ARGUMENT
 }
 
 fn insert_options(

@@ -1741,6 +1741,24 @@ public static class MiniExcelRust
                 writer.Write((byte)4);
                 WriteFrameString(writer, text);
                 break;
+#if NET8_0_OR_GREATER
+            case DateOnly date:
+                writer.Write((byte)5);
+                WriteFrameString(writer, date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                break;
+            case TimeOnly time:
+                writer.Write((byte)6);
+                WriteFrameString(writer, time.ToString("HH:mm:ss.fffffff", CultureInfo.InvariantCulture));
+                break;
+#endif
+            case DateTime dateTime:
+                writer.Write((byte)7);
+                WriteFrameString(writer, dateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff", CultureInfo.InvariantCulture));
+                break;
+            case TimeSpan duration:
+                writer.Write((byte)8);
+                writer.Write(checked((long)duration.TotalMilliseconds));
+                break;
             default:
                 throw new NotSupportedException($"Values of type {value.GetType().FullName} are not supported by SaveAs yet.");
         }

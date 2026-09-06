@@ -427,6 +427,7 @@ dependencies = [
 name = "miniexcel-ffi"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "miniexcel",
  "serde_json",
 ]
