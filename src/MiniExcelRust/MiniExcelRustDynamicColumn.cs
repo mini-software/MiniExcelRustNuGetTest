@@ -7,4 +7,5 @@ public sealed class MiniExcelRustDynamicColumn
     public string? Format { get; set; }
     public bool Ignore { get; set; }
     public Func<object?, object?>? CustomFormatter { get; set; }
+    public bool IsFormula { get; set; }
 }

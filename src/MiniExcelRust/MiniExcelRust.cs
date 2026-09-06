@@ -43,6 +43,31 @@ public static class MiniExcelRust
             cancellationToken);
     }
 
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryAsync(
+        Stream stream,
+        bool useHeaderRow = false,
+        string? sheetName = null,
+        string startCell = "A1",
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false,
+        CancellationToken cancellationToken = default) =>
+        ToAsyncEnumerable(
+            Query(stream, useHeaderRow, sheetName, startCell, configuration, leaveOpen),
+            cancellationToken);
+
+    public static IAsyncEnumerable<T> QueryAsync<T>(
+        Stream stream,
+        string? sheetName = null,
+        string startCell = "A1",
+        bool treatHeaderAsData = false,
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false,
+        CancellationToken cancellationToken = default)
+        where T : class, new() =>
+        ToAsyncEnumerable(
+            Query<T>(stream, sheetName, startCell, treatHeaderAsData, configuration, leaveOpen),
+            cancellationToken);
+
     public static IAsyncEnumerable<IDictionary<string, object?>> QueryRangeAsync(
         string path,
         bool useHeaderRow = false,
@@ -57,6 +82,43 @@ public static class MiniExcelRust
             cancellationToken);
     }
 
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryRangeAsync(
+        Stream stream,
+        bool useHeaderRow,
+        string? sheetName,
+        int startRowIndex,
+        int startColumnIndex,
+        int? endRowIndex = null,
+        int? endColumnIndex = null,
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false,
+        CancellationToken cancellationToken = default) =>
+        ToAsyncEnumerable(
+            QueryRange(
+                stream,
+                useHeaderRow,
+                sheetName,
+                startRowIndex,
+                startColumnIndex,
+                endRowIndex,
+                endColumnIndex,
+                configuration,
+                leaveOpen),
+            cancellationToken);
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryRangeAsync(
+        Stream stream,
+        bool useHeaderRow = false,
+        string? sheetName = null,
+        string startCell = "A1",
+        string? endCell = null,
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false,
+        CancellationToken cancellationToken = default) =>
+        ToAsyncEnumerable(
+            QueryRange(stream, useHeaderRow, sheetName, startCell, endCell, configuration, leaveOpen),
+            cancellationToken);
+
     public static IAsyncEnumerable<IDictionary<string, object?>> QueryTableAsync(
         string path,
         string? sheetName = null,
@@ -66,6 +128,22 @@ public static class MiniExcelRust
         return ToAsyncEnumerable(QueryTable(path, sheetName, tableName), cancellationToken);
     }
 
+    public static IAsyncEnumerable<T> QueryTableAsync<T>(
+        string path,
+        string? sheetName = null,
+        string tableName = "Table1",
+        CancellationToken cancellationToken = default)
+        where T : class, new() =>
+        ToAsyncEnumerable(QueryTable<T>(path, sheetName, tableName), cancellationToken);
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryTableAsync(
+        Stream stream,
+        string? sheetName = null,
+        string tableName = "Table1",
+        bool leaveOpen = false,
+        CancellationToken cancellationToken = default) =>
+        ToAsyncEnumerable(QueryTable(stream, sheetName, tableName, leaveOpen), cancellationToken);
+
     public static IAsyncEnumerable<IDictionary<string, object?>> QueryCsvAsync(
         string path,
         bool useHeaderRow = false,
@@ -74,6 +152,14 @@ public static class MiniExcelRust
     {
         return ToAsyncEnumerable(QueryCsv(path, useHeaderRow, configuration), cancellationToken);
     }
+
+    public static IAsyncEnumerable<T> QueryCsvAsync<T>(
+        string path,
+        bool treatHeaderAsData = false,
+        MiniExcelRustCsvReadOptions? configuration = null,
+        CancellationToken cancellationToken = default)
+        where T : class, new() =>
+        ToAsyncEnumerable(QueryCsv<T>(path, treatHeaderAsData, configuration), cancellationToken);
 
     public static IEnumerable<T> Query<T>(
         string path,
@@ -119,6 +205,27 @@ public static class MiniExcelRust
             configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
     }
 
+    public static IEnumerable<T> QueryRange<T>(
+        Stream stream,
+        string? sheetName = null,
+        string startCell = "A1",
+        string? endCell = null,
+        bool treatHeaderAsData = false,
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false)
+        where T : class, new() =>
+        MiniExcelRustMapper.Map<T>(
+            QueryRange(
+                stream,
+                !treatHeaderAsData,
+                sheetName,
+                startCell,
+                endCell,
+                configuration,
+                leaveOpen),
+            configuration?.Culture,
+            configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
+
     public static IEnumerable<T> QueryTable<T>(
         string path,
         string? sheetName = null,
@@ -128,6 +235,14 @@ public static class MiniExcelRust
         return MiniExcelRustMapper.Map<T>(QueryTable(path, sheetName, tableName));
     }
 
+    public static IEnumerable<T> QueryTable<T>(
+        Stream stream,
+        string? sheetName = null,
+        string tableName = "Table1",
+        bool leaveOpen = false)
+        where T : class, new() =>
+        MiniExcelRustMapper.Map<T>(QueryTable(stream, sheetName, tableName, leaveOpen));
+
     public static IEnumerable<T> QueryCsv<T>(
         string path,
         bool treatHeaderAsData = false,
@@ -136,6 +251,19 @@ public static class MiniExcelRust
     {
         return MiniExcelRustMapper.Map<T>(
             QueryCsv(path, !treatHeaderAsData, configuration),
+            configuration?.Culture,
+            configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
+    }
+
+    public static IEnumerable<T> QueryCsv<T>(
+        Stream stream,
+        bool treatHeaderAsData = false,
+        MiniExcelRustCsvReadOptions? configuration = null,
+        bool leaveOpen = false)
+        where T : class, new()
+    {
+        return MiniExcelRustMapper.Map<T>(
+            QueryCsv(stream, !treatHeaderAsData, configuration, leaveOpen),
             configuration?.Culture,
             configuration?.DynamicColumns as IReadOnlyDictionary<string, MiniExcelRustDynamicColumn>);
     }
@@ -598,6 +726,70 @@ public static class MiniExcelRust
         return QueryStreamIterator(stream, useHeaderRow, sheetName, startCell, endCell, configuration, leaveOpen);
     }
 
+    public static IEnumerable<IDictionary<string, object?>> QueryRange(
+        string path,
+        bool useHeaderRow,
+        string? sheetName,
+        int startRowIndex,
+        int startColumnIndex,
+        int? endRowIndex = null,
+        int? endColumnIndex = null,
+        MiniExcelRustReadOptions? configuration = null)
+    {
+        var startCell = ToCellReference(startRowIndex, startColumnIndex);
+        var endCell = endRowIndex.HasValue || endColumnIndex.HasValue
+            ? ToCellReference(endRowIndex ?? 1_048_576, endColumnIndex ?? 16_384)
+            : null;
+        return QueryRange(path, useHeaderRow, sheetName, startCell, endCell, configuration);
+    }
+
+    public static IEnumerable<IDictionary<string, object?>> QueryRange(
+        Stream stream,
+        bool useHeaderRow,
+        string? sheetName,
+        int startRowIndex,
+        int startColumnIndex,
+        int? endRowIndex = null,
+        int? endColumnIndex = null,
+        MiniExcelRustReadOptions? configuration = null,
+        bool leaveOpen = false)
+    {
+        var startCell = ToCellReference(startRowIndex, startColumnIndex);
+        var endCell = endRowIndex.HasValue || endColumnIndex.HasValue
+            ? ToCellReference(endRowIndex ?? 1_048_576, endColumnIndex ?? 16_384)
+            : null;
+        return QueryRange(
+            stream,
+            useHeaderRow,
+            sheetName,
+            startCell,
+            endCell,
+            configuration,
+            leaveOpen);
+    }
+
+    public static IAsyncEnumerable<IDictionary<string, object?>> QueryRangeAsync(
+        string path,
+        bool useHeaderRow,
+        string? sheetName,
+        int startRowIndex,
+        int startColumnIndex,
+        int? endRowIndex = null,
+        int? endColumnIndex = null,
+        MiniExcelRustReadOptions? configuration = null,
+        CancellationToken cancellationToken = default) =>
+        ToAsyncEnumerable(
+            QueryRange(
+                path,
+                useHeaderRow,
+                sheetName,
+                startRowIndex,
+                startColumnIndex,
+                endRowIndex,
+                endColumnIndex,
+                configuration),
+            cancellationToken);
+
     /// <summary>
     /// Streams rows from a named OpenXML table.
     /// </summary>
@@ -872,13 +1064,117 @@ public static class MiniExcelRust
         if (rows is null)
             throw new ArgumentNullException(nameof(rows));
         cancellationToken.ThrowIfCancellationRequested();
-        var materialized = new List<T>();
-        await foreach (var row in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+        var spoolPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-spool-{Guid.NewGuid():N}.bin");
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            materialized.Add(row);
+            List<string>? schema = null;
+            long cellCount = 0;
+            using (var spool = new FileStream(
+                spoolPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                81920,
+                useAsync: true))
+            {
+                await foreach (var value in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var row = value is IDictionary<string, object?> dynamicRow
+                        ? dynamicRow
+                        : MiniExcelRustMapper.ToRows(new[] { value }).Single();
+                    schema ??= row.Keys.ToList();
+                    cellCount += row.Count;
+                    var frame = EncodeRows(new[] { row });
+                    var length = BitConverter.GetBytes(checked((uint)frame.Length));
+                    await spool.WriteAsync(length, 0, length.Length, cancellationToken).ConfigureAwait(false);
+                    await spool.WriteAsync(frame, 0, frame.Length, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            if (schema is null)
+                throw new InvalidOperationException("Async export requires at least one row to infer its schema.");
+
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                schema,
+                sheetName,
+                overwriteFile,
+                printHeader
+            }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            using var nativePath = new Utf8String(Path.GetFullPath(path));
+            using var nativeSpoolPath = new Utf8String(spoolPath);
+            using var nativeCancellation = NativeCancellationHandle.Create();
+            using var registration = cancellationToken.Register(
+                static state => NativeMethods.Cancel((NativeCancellationHandle)state!),
+                nativeCancellation);
+            var payloadHandle = GCHandle.Alloc(payload, GCHandleType.Pinned);
+            try
+            {
+                var nativeResult = await Task.Run(() =>
+                {
+                    var result = NativeMethods.SaveAsSpooledAsync(
+                        nativePath.Pointer,
+                        nativeSpoolPath.Pointer,
+                        payloadHandle.AddrOfPinnedObject(),
+                        (UIntPtr)(uint)payload.Length,
+                        nativeCancellation,
+                        out var rowCount);
+                    return (Result: result, RowCount: rowCount);
+                }).ConfigureAwait(false);
+                if (nativeResult.Result < 0)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                        throw new OperationCanceledException(cancellationToken);
+                    throw CreateNativeException(nativeResult.Result);
+                }
+                if (progress is not null)
+                {
+                    for (long index = 0; index < cellCount; index++)
+                        progress.Report(1);
+                }
+                return checked((int)nativeResult.RowCount);
+            }
+            finally
+            {
+                payloadHandle.Free();
+            }
         }
-        return SaveAs(path, materialized, printHeader, sheetName, overwriteFile, progress);
+        finally
+        {
+            DeleteTemporaryFile(spoolPath);
+        }
+    }
+
+    public static async Task<int> SaveAsAsync<T>(
+        Stream stream,
+        IAsyncEnumerable<T> rows,
+        bool printHeader = true,
+        string sheetName = "Sheet1",
+        bool leaveOpen = false,
+        IProgress<int>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateWritableStream(stream);
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-{Guid.NewGuid():N}.xlsx");
+        try
+        {
+            var count = await SaveAsAsync(
+                temporaryPath,
+                rows,
+                printHeader,
+                sheetName,
+                false,
+                progress,
+                cancellationToken).ConfigureAwait(false);
+            CopyFileToStream(temporaryPath, stream);
+            return count;
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
     }
 
     public static int[] SaveAsSheets(
@@ -966,6 +1262,10 @@ public static class MiniExcelRust
         if (rows is null)
             throw new ArgumentNullException(nameof(rows));
         options ??= new MiniExcelRustWriteOptions();
+        var formulaColumns = options.DynamicColumns
+            .Where(column => column.Value.IsFormula)
+            .Select(column => string.IsNullOrWhiteSpace(column.Value.Name) ? column.Key : column.Value.Name!)
+            .ToArray();
 
         EnsureAbiVersion();
         var frame = EncodeRows(rows);
@@ -996,7 +1296,8 @@ public static class MiniExcelRust
             options.DurationFormat,
             options.ColumnFormats,
             options.ColumnWidths,
-            options.HiddenColumns
+            options.HiddenColumns,
+            formulaColumns
         }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
         using var nativePath = new Utf8String(Path.GetFullPath(path));
         var frameHandle = GCHandle.Alloc(frame, GCHandleType.Pinned);
@@ -1093,6 +1394,104 @@ public static class MiniExcelRust
         return SaveAsCsv(path, MiniExcelRustMapper.ToRows(rows), configuration);
     }
 
+    public static int SaveAsCsv<T>(
+        Stream stream,
+        IEnumerable<T> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null,
+        bool leaveOpen = false)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
+            return SaveAsCsv(stream, dynamicRows, configuration, leaveOpen);
+        return SaveAsCsv(stream, MiniExcelRustMapper.ToRows(rows), configuration, leaveOpen);
+    }
+
+    public static async Task<int> SaveAsCsvAsync<T>(
+        string path,
+        IAsyncEnumerable<T> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        cancellationToken.ThrowIfCancellationRequested();
+        configuration ??= new MiniExcelRustCsvWriteOptions();
+        var spoolPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-csv-spool-{Guid.NewGuid():N}.bin");
+        try
+        {
+            List<string>? schema = null;
+            using (var spool = new FileStream(
+                spoolPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                81920,
+                useAsync: true))
+            {
+                await foreach (var value in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var row = value is IDictionary<string, object?> dynamicRow
+                        ? dynamicRow
+                        : MiniExcelRustMapper.ToRows(new[] { value }).Single();
+                    schema ??= row.Keys.ToList();
+                    var frame = EncodeRows(new[] { row });
+                    var length = BitConverter.GetBytes(checked((uint)frame.Length));
+                    await spool.WriteAsync(length, 0, length.Length, cancellationToken).ConfigureAwait(false);
+                    await spool.WriteAsync(frame, 0, frame.Length, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            if (schema is null)
+                throw new InvalidOperationException("Async CSV export requires at least one row to infer its schema.");
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                schema,
+                delimiter = (byte)configuration.Delimiter,
+                encoding = (byte)configuration.Encoding,
+                configuration.WriteBom,
+                configuration.PrintHeader,
+                configuration.OverwriteFile
+            }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            using var nativePath = new Utf8String(Path.GetFullPath(path));
+            using var nativeSpoolPath = new Utf8String(spoolPath);
+            using var nativeCancellation = NativeCancellationHandle.Create();
+            using var registration = cancellationToken.Register(
+                static state => NativeMethods.Cancel((NativeCancellationHandle)state!),
+                nativeCancellation);
+            var payloadHandle = GCHandle.Alloc(payload, GCHandleType.Pinned);
+            try
+            {
+                var nativeResult = await Task.Run(() =>
+                {
+                    var result = NativeMethods.SaveCsvSpooledAsync(
+                        nativePath.Pointer,
+                        nativeSpoolPath.Pointer,
+                        payloadHandle.AddrOfPinnedObject(),
+                        (UIntPtr)(uint)payload.Length,
+                        nativeCancellation,
+                        out var rowCount);
+                    return (Result: result, RowCount: rowCount);
+                }).ConfigureAwait(false);
+                if (nativeResult.Result < 0)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                        throw new OperationCanceledException(cancellationToken);
+                    throw CreateNativeException(nativeResult.Result);
+                }
+                return checked((int)nativeResult.RowCount);
+            }
+            finally
+            {
+                payloadHandle.Free();
+            }
+        }
+        finally
+        {
+            DeleteTemporaryFile(spoolPath);
+        }
+    }
+
     /// <summary>
     /// Appends dynamic rows to a CSV file without repeating its header.
     /// </summary>
@@ -1112,6 +1511,19 @@ public static class MiniExcelRust
         if (rows is null)
             throw new ArgumentNullException(nameof(rows));
         return AppendCsv(path, MiniExcelRustMapper.ToRows(rows), configuration);
+    }
+
+    public static int AppendCsv<T>(
+        Stream stream,
+        IEnumerable<T> rows,
+        MiniExcelRustCsvWriteOptions? configuration = null,
+        bool leaveOpen = false)
+    {
+        if (rows is null)
+            throw new ArgumentNullException(nameof(rows));
+        if (rows is IEnumerable<IDictionary<string, object?>> dynamicRows)
+            return AppendCsv(stream, dynamicRows, configuration, leaveOpen);
+        return AppendCsv(stream, MiniExcelRustMapper.ToRows(rows), configuration, leaveOpen);
     }
 
     public static int SaveAsCsv(
@@ -1312,6 +1724,33 @@ public static class MiniExcelRust
         finally
         {
             frameHandle.Free();
+        }
+    }
+
+    public static int InsertSheet(
+        Stream stream,
+        IEnumerable<IDictionary<string, object?>> rows,
+        string sheetName,
+        MiniExcelRustInsertOptions? options = null,
+        bool leaveOpen = false)
+    {
+        ValidateReadableStream(stream);
+        ValidateWritableStream(stream);
+        if (!stream.CanSeek)
+            throw new ArgumentException("The stream must be seekable for worksheet insertion.", nameof(stream));
+        stream.Position = 0;
+        var temporaryPath = StageStream(stream);
+        try
+        {
+            var count = InsertSheet(temporaryPath, rows, sheetName, options);
+            CopyFileToStream(temporaryPath, stream);
+            return count;
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
         }
     }
 
@@ -1565,6 +2004,70 @@ public static class MiniExcelRust
             MergeSameCells(destinationStream, sourcePath, leaveOpen);
             return 0;
         });
+    }
+
+    public static void AddPicture(string path, params MiniExcelRustPicture[] pictures)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("The path is required.", nameof(path));
+        if (pictures is null || pictures.Length == 0)
+            throw new ArgumentException("At least one picture is required.", nameof(pictures));
+        EnsureAbiVersion();
+        using var nativePath = new Utf8String(Path.GetFullPath(path));
+        foreach (var picture in pictures)
+        {
+            if (picture.ImageBytes is null || picture.ImageBytes.Length == 0)
+                throw new ArgumentException("Picture data is required.", nameof(pictures));
+            if (picture.WidthPx <= 0 || picture.HeightPx <= 0)
+                throw new ArgumentOutOfRangeException(nameof(pictures), "Picture dimensions must be positive.");
+            using var nativeSheetName = new Utf8String(picture.SheetName);
+            using var nativeCellAddress = new Utf8String(picture.CellAddress);
+            var imageHandle = GCHandle.Alloc(picture.ImageBytes, GCHandleType.Pinned);
+            try
+            {
+                var result = NativeMethods.AddPicture(
+                    nativePath.Pointer,
+                    nativeSheetName.Pointer,
+                    nativeCellAddress.Pointer,
+                    imageHandle.AddrOfPinnedObject(),
+                    (UIntPtr)(uint)picture.ImageBytes.Length,
+                    checked((uint)picture.WidthPx),
+                    checked((uint)picture.HeightPx),
+                    (byte)picture.Anchor,
+                    picture.LocationX,
+                    picture.LocationY);
+                if (result < 0)
+                    throw CreateNativeException(result);
+            }
+            finally
+            {
+                imageHandle.Free();
+            }
+        }
+    }
+
+    public static void AddPicture(
+        Stream stream,
+        bool leaveOpen = false,
+        params MiniExcelRustPicture[] pictures)
+    {
+        ValidateReadableStream(stream);
+        ValidateWritableStream(stream);
+        if (!stream.CanSeek)
+            throw new ArgumentException("The stream must be seekable for picture insertion.", nameof(stream));
+        stream.Position = 0;
+        var temporaryPath = StageStream(stream);
+        try
+        {
+            AddPicture(temporaryPath, pictures);
+            CopyFileToStream(temporaryPath, stream);
+        }
+        finally
+        {
+            if (!leaveOpen)
+                stream.Dispose();
+            DeleteTemporaryFile(temporaryPath);
+        }
     }
 
     private static IEnumerable<IDictionary<string, object?>> QueryStreamIterator(
@@ -2177,6 +2680,22 @@ public static class MiniExcelRust
             throw new ArgumentException("The sheet name is required.", nameof(sheetName));
     }
 
+    private static string ToCellReference(int row, int column)
+    {
+        if (row is < 1 or > 1_048_576)
+            throw new ArgumentOutOfRangeException(nameof(row));
+        if (column is < 1 or > 16_384)
+            throw new ArgumentOutOfRangeException(nameof(column));
+        var letters = string.Empty;
+        while (column > 0)
+        {
+            column--;
+            letters = (char)('A' + column % 26) + letters;
+            column /= 26;
+        }
+        return letters + row.ToString(CultureInfo.InvariantCulture);
+    }
+
     private static void DeleteTemporaryFile(string? path)
     {
         if (path is not null && File.Exists(path))
@@ -2346,6 +2865,27 @@ public static class MiniExcelRust
         protected override bool ReleaseHandle()
         {
             NativeMethods.BufferClose(handle);
+            return true;
+        }
+    }
+
+    private sealed class NativeCancellationHandle : SafeHandleZeroOrMinusOneIsInvalid
+    {
+        private NativeCancellationHandle() : base(true) { }
+
+        public static NativeCancellationHandle Create()
+        {
+            var result = NativeMethods.CreateCancellation(out var rawHandle);
+            if (result < 0)
+                throw CreateNativeException(result);
+            var handle = new NativeCancellationHandle();
+            handle.SetHandle(rawHandle);
+            return handle;
+        }
+
+        protected override bool ReleaseHandle()
+        {
+            NativeMethods.CloseCancellation(handle);
             return true;
         }
     }
@@ -2577,6 +3117,46 @@ public static class MiniExcelRust
             IntPtr destinationPath,
             IntPtr sourcePath,
             byte overwriteFile);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_add_picture", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int AddPicture(
+            IntPtr path,
+            IntPtr sheetName,
+            IntPtr cellAddress,
+            IntPtr imageData,
+            UIntPtr imageLength,
+            uint widthPx,
+            uint heightPx,
+            byte anchorType,
+            int locationX,
+            int locationY);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_save_as_spooled_async", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SaveAsSpooledAsync(
+            IntPtr path,
+            IntPtr spoolPath,
+            IntPtr optionsJson,
+            UIntPtr optionsLength,
+            NativeCancellationHandle cancellation,
+            out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_save_csv_spooled_async", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int SaveCsvSpooledAsync(
+            IntPtr path,
+            IntPtr spoolPath,
+            IntPtr optionsJson,
+            UIntPtr optionsLength,
+            NativeCancellationHandle cancellation,
+            out uint rowCount);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_cancellation_create", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int CreateCancellation(out IntPtr handle);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_cancellation_cancel", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void Cancel(NativeCancellationHandle handle);
+
+        [DllImport(LibraryName, EntryPoint = "miniexcel_cancellation_close", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void CloseCancellation(IntPtr handle);
 
         [DllImport(LibraryName, EntryPoint = "miniexcel_buffer_close", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void BufferClose(IntPtr handle);

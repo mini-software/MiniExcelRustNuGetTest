@@ -1,9 +1,10 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, c_char};
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, ErrorKind, Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::ptr;
 use std::str::FromStr;
 
@@ -17,7 +18,8 @@ use miniexcel::{
 };
 use quick_xml::Reader as XmlReader;
 use quick_xml::events::{BytesStart, Event};
-use zip::ZipArchive;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 const ABI_VERSION: u32 = 1;
 const RESULT_END: i32 = 0;
@@ -135,6 +137,10 @@ pub struct BufferHandle {
     frame: Vec<u8>,
 }
 
+pub struct CancellationHandle {
+    token: miniexcel::CancellationToken,
+}
+
 struct QueryOpenOptions {
     path: *const c_char,
     use_header_row: u8,
@@ -158,6 +164,64 @@ struct CsvWriteArguments {
     write_bom: u8,
     print_header: u8,
     overwrite_file: u8,
+}
+
+struct SpoolRows {
+    reader: BufReader<File>,
+    finished: bool,
+}
+
+impl SpoolRows {
+    fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self {
+            reader: BufReader::new(File::open(path)?),
+            finished: false,
+        })
+    }
+}
+
+impl Iterator for SpoolRows {
+    type Item = miniexcel::Result<DynamicRow>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let mut length = [0_u8; 4];
+        if let Err(error) = self.reader.read_exact(&mut length) {
+            self.finished = true;
+            return if error.kind() == ErrorKind::UnexpectedEof {
+                None
+            } else {
+                Some(Err(error.into()))
+            };
+        }
+        let length = u32::from_le_bytes(length) as usize;
+        let mut frame = vec![0_u8; length];
+        if let Err(error) = self.reader.read_exact(&mut frame) {
+            self.finished = true;
+            return Some(Err(error.into()));
+        }
+        match decode_rows(&frame) {
+            Ok(mut rows) if rows.len() == 1 => Some(Ok(rows.remove(0))),
+            Ok(_) => {
+                self.finished = true;
+                Some(Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "spool frame must contain exactly one row",
+                )
+                .into()))
+            }
+            Err(_) => {
+                self.finished = true;
+                Some(Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "spool row frame is invalid",
+                )
+                .into()))
+            }
+        }
+    }
 }
 
 type DeclaredDimension = (Option<String>, Option<String>);
@@ -1016,7 +1080,7 @@ pub unsafe extern "C" fn miniexcel_save_as_configured(
         }
         unsafe { ptr::write(out_row_count, 0) };
         let path = unsafe { read_utf8(path) }?;
-        let rows = decode_rows(unsafe { std::slice::from_raw_parts(data, data_length) })?;
+        let mut rows = decode_rows(unsafe { std::slice::from_raw_parts(data, data_length) })?;
         let payload: serde_json::Value = serde_json::from_slice(unsafe {
             std::slice::from_raw_parts(options_json, options_length)
         })
@@ -1025,17 +1089,263 @@ pub unsafe extern "C" fn miniexcel_save_as_configured(
             ERROR_INVALID_ARGUMENT
         })?;
         let options = configured_write_options(&payload)?;
-        if let Some(schema) = configured_schema(&payload)? {
-            MiniExcel::save_as_with_schema(path, &schema, &rows, &options)
+        let schema = configured_schema(&payload)?;
+        let formula_columns = configured_formula_columns(&payload)?;
+        if formula_columns.is_empty() {
+            write_configured_workbook(path, &rows, schema.as_deref(), &options)?;
         } else {
-            MiniExcel::save_as_with_options(path, &rows, &options)
+            for row in &mut rows {
+                for column in &formula_columns {
+                    if let Some(value) = row.get_mut(column) {
+                        let CellValue::String(formula) = value else {
+                            set_last_error(format!(
+                                "formula column '{column}' requires string values"
+                            ));
+                            return Err(ERROR_INVALID_ARGUMENT);
+                        };
+                        let formula = formula.strip_prefix('=').unwrap_or(formula);
+                        *value = CellValue::String(format!("$={formula}"));
+                    }
+                }
+            }
+            let destination = Path::new(path);
+            let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+            let staging = tempfile::Builder::new()
+                .prefix(".miniexcel-formula-")
+                .suffix(".xlsx")
+                .tempfile_in(parent)
+                .map_err(write_error)?
+                .into_temp_path();
+            std::fs::remove_file(&staging).map_err(write_error)?;
+            let staging_options = options.clone().with_overwrite_file(false);
+            let staging_path: &Path = staging.as_ref();
+            write_configured_workbook(staging_path, &rows, schema.as_deref(), &staging_options)?;
+            let template_options = TemplateOptions::new()
+                .with_overwrite_file(json_bool(&payload, "overwriteFile", false)?)
+                .with_ignore_missing_variables(true);
+            MiniExcel::save_as_template(path, &staging, &serde_json::json!({}), &template_options)
+                .map_err(|error| {
+                    set_last_error(error.to_string());
+                    ERROR_WRITE
+                })?;
         }
-        .map_err(|error| {
-            set_last_error(error.to_string());
-            ERROR_WRITE
-        })?;
         write_row_count(rows.len(), out_row_count)
     })
+}
+
+/// Creates a cancellable XLSX export by consuming framed rows from a spool file once.
+///
+/// # Safety
+///
+/// All pointers must be non-null, valid, and remain alive for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_save_as_spooled_async(
+    path: *const c_char,
+    spool_path: *const c_char,
+    options_json: *const u8,
+    options_length: usize,
+    cancellation: *mut CancellationHandle,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null()
+            || spool_path.is_null()
+            || options_json.is_null()
+            || cancellation.is_null()
+            || out_row_count.is_null()
+        {
+            set_last_error(
+                "path, spool_path, options_json, cancellation, and out_row_count are required",
+            );
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe { ptr::write(out_row_count, 0) };
+        let path = unsafe { read_utf8(path) }?;
+        let spool_path = unsafe { read_utf8(spool_path) }?;
+        let payload: serde_json::Value = serde_json::from_slice(unsafe {
+            std::slice::from_raw_parts(options_json, options_length)
+        })
+        .map_err(|error| {
+            set_last_error(format!("invalid write-options JSON: {error}"));
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let schema = configured_schema(&payload)?.ok_or_else(|| {
+            set_last_error("async spool export requires an explicit schema");
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let options = configured_write_options(&payload)?;
+        let rows = SpoolRows::open(spool_path).map_err(write_error)?;
+        let rows = futures_util::stream::iter(rows);
+        let token = unsafe { &*cancellation }.token.clone();
+        let count =
+            futures_executor::block_on(MiniExcel::save_as_with_schema_async_with_cancellation(
+                path, &schema, rows, &options, token,
+            ))
+            .map_err(|error| {
+                set_last_error(error.to_string());
+                ERROR_WRITE
+            })?;
+        write_row_count(count, out_row_count)
+    })
+}
+
+/// Creates a cancellable CSV export by consuming framed rows from a spool file once.
+///
+/// # Safety
+///
+/// All pointers must be non-null, valid, and remain alive for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_save_csv_spooled_async(
+    path: *const c_char,
+    spool_path: *const c_char,
+    options_json: *const u8,
+    options_length: usize,
+    cancellation: *mut CancellationHandle,
+    out_row_count: *mut u32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null()
+            || spool_path.is_null()
+            || options_json.is_null()
+            || cancellation.is_null()
+            || out_row_count.is_null()
+        {
+            set_last_error(
+                "path, spool_path, options_json, cancellation, and out_row_count are required",
+            );
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        unsafe { ptr::write(out_row_count, 0) };
+        let path = unsafe { read_utf8(path) }?;
+        let spool_path = unsafe { read_utf8(spool_path) }?;
+        let payload: serde_json::Value = serde_json::from_slice(unsafe {
+            std::slice::from_raw_parts(options_json, options_length)
+        })
+        .map_err(|error| {
+            set_last_error(format!("invalid CSV write-options JSON: {error}"));
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let schema = configured_schema(&payload)?.ok_or_else(|| {
+            set_last_error("async CSV spool export requires an explicit schema");
+            ERROR_INVALID_ARGUMENT
+        })?;
+        let configuration = CsvConfiguration::new()
+            .with_delimiter(
+                json_u64(&payload, "delimiter", b',' as u64)?
+                    .try_into()
+                    .map_err(|_| invalid_write_options("delimiter exceeds one byte"))?,
+            )
+            .with_encoding(parse_csv_encoding(
+                json_u64(&payload, "encoding", 0)?
+                    .try_into()
+                    .map_err(|_| invalid_write_options("encoding exceeds one byte"))?,
+            )?)
+            .with_write_bom(json_bool(&payload, "writeBom", true)?);
+        let options = CsvWriteOptions::new()
+            .with_configuration(configuration)
+            .with_print_header(json_bool(&payload, "printHeader", true)?)
+            .with_overwrite_file(true);
+        let overwrite = json_bool(&payload, "overwriteFile", false)?;
+        let destination = Path::new(path);
+        if destination.exists() && !overwrite {
+            set_last_error(format!(
+                "destination '{}' already exists",
+                destination.display()
+            ));
+            return Err(ERROR_WRITE);
+        }
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let staging = tempfile::Builder::new()
+            .prefix(".miniexcel-csv-")
+            .suffix(".csv")
+            .tempfile_in(parent)
+            .map_err(write_error)?
+            .into_temp_path();
+        let staging_path: &Path = staging.as_ref();
+        let token = unsafe { &*cancellation }.token.clone();
+        let rows = SpoolRows::open(spool_path).map_err(write_error)?;
+        let mut count = 0_usize;
+        for row in rows {
+            if token.is_cancelled() {
+                set_last_error("operation cancelled");
+                return Err(ERROR_WRITE);
+            }
+            let row = row.map_err(|error| {
+                set_last_error(error.to_string());
+                ERROR_WRITE
+            })?;
+            if count == 0 {
+                MiniExcel::save_csv_with_schema(staging_path, &schema, &[row], &options)
+            } else {
+                MiniExcel::append_csv_with_schema(staging_path, &schema, &[row], &options)
+            }
+            .map_err(|error| {
+                set_last_error(error.to_string());
+                ERROR_WRITE
+            })?;
+            count += 1;
+        }
+        if count == 0 {
+            MiniExcel::save_csv_with_schema(staging_path, &schema, &[], &options).map_err(
+                |error| {
+                    set_last_error(error.to_string());
+                    ERROR_WRITE
+                },
+            )?;
+        }
+        if token.is_cancelled() {
+            set_last_error("operation cancelled");
+            return Err(ERROR_WRITE);
+        }
+        publish_staged_file(staging_path, destination)?;
+        write_row_count(count, out_row_count)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Creates a native cooperative cancellation handle.
+///
+/// # Safety
+///
+/// `out_handle` must be non-null and writable.
+pub unsafe extern "C" fn miniexcel_cancellation_create(
+    out_handle: *mut *mut CancellationHandle,
+) -> i32 {
+    ffi_result(|| {
+        if out_handle.is_null() {
+            set_last_error("out_handle is required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let handle = Box::new(CancellationHandle {
+            token: miniexcel::CancellationToken::new(),
+        });
+        unsafe { ptr::write(out_handle, Box::into_raw(handle)) };
+        Ok(RESULT_BATCH)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Signals cooperative cancellation.
+///
+/// # Safety
+///
+/// `handle` must be null or a live cancellation handle returned by this library.
+pub unsafe extern "C" fn miniexcel_cancellation_cancel(handle: *mut CancellationHandle) {
+    if !handle.is_null() {
+        unsafe { &*handle }.token.cancel();
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Releases a native cancellation handle.
+///
+/// # Safety
+///
+/// `handle` must be null or a live cancellation handle that has not already been closed.
+pub unsafe extern "C" fn miniexcel_cancellation_close(handle: *mut CancellationHandle) {
+    if !handle.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(handle) })));
+    }
 }
 
 /// Creates a CSV file from encoded dynamic rows.
@@ -1261,6 +1571,57 @@ pub unsafe extern "C" fn miniexcel_merge_same_cells(
             set_last_error(error.to_string());
             ERROR_WRITE
         })?;
+        Ok(RESULT_BATCH)
+    })
+}
+
+/// Adds one PNG picture to an existing XLSX workbook.
+///
+/// # Safety
+///
+/// String and image pointers must be valid for the supplied lengths. `sheet_name` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miniexcel_add_picture(
+    path: *const c_char,
+    sheet_name: *const c_char,
+    cell_address: *const c_char,
+    image_data: *const u8,
+    image_length: usize,
+    width_px: u32,
+    height_px: u32,
+    anchor_type: u8,
+    location_x: i32,
+    location_y: i32,
+) -> i32 {
+    ffi_result(|| {
+        if path.is_null() || cell_address.is_null() || image_data.is_null() {
+            set_last_error("path, cell_address, and image_data are required");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        if image_length == 0 || width_px == 0 || height_px == 0 {
+            set_last_error("image data, width, and height must be non-zero");
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let path = unsafe { read_utf8(path) }?;
+        let sheet_name = if sheet_name.is_null() {
+            None
+        } else {
+            let value = unsafe { read_utf8(sheet_name) }?;
+            (!value.is_empty()).then_some(value)
+        };
+        let cell_address = unsafe { read_utf8(cell_address) }?;
+        let image = unsafe { std::slice::from_raw_parts(image_data, image_length) };
+        add_png_picture(
+            path,
+            sheet_name,
+            cell_address,
+            image,
+            width_px,
+            height_px,
+            anchor_type,
+            location_x,
+            location_y,
+        )?;
         Ok(RESULT_BATCH)
     })
 }
@@ -1737,6 +2098,55 @@ fn configured_schema(payload: &serde_json::Value) -> Result<Option<Vec<String>>,
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn configured_formula_columns(payload: &serde_json::Value) -> Result<Vec<String>, i32> {
+    let Some(columns) = payload.get("formulaColumns") else {
+        return Ok(Vec::new());
+    };
+    let values = columns
+        .as_array()
+        .ok_or_else(|| invalid_write_options("formulaColumns must be an array"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_write_options("formulaColumns values must be strings"))
+        })
+        .collect()
+}
+
+fn write_configured_workbook(
+    path: impl AsRef<Path>,
+    rows: &[DynamicRow],
+    schema: Option<&[String]>,
+    options: &WriteOptions,
+) -> Result<(), i32> {
+    match schema {
+        Some(schema) => MiniExcel::save_as_with_schema(path, schema, rows, options),
+        None => MiniExcel::save_as_with_options(path, rows, options),
+    }
+    .map_err(|error| {
+        set_last_error(error.to_string());
+        ERROR_WRITE
+    })
+}
+
+fn write_error(error: impl std::fmt::Display) -> i32 {
+    set_last_error(format!("failed to write output: {error}"));
+    ERROR_WRITE
+}
+
+#[cfg(windows)]
+fn publish_staged_file(source: &Path, destination: &Path) -> Result<(), i32> {
+    atomicwrites::replace_atomic(source, destination).map_err(write_error)
+}
+
+#[cfg(not(windows))]
+fn publish_staged_file(source: &Path, destination: &Path) -> Result<(), i32> {
+    std::fs::rename(source, destination).map_err(write_error)
 }
 
 fn configured_write_options(payload: &serde_json::Value) -> Result<WriteOptions, i32> {
@@ -2233,6 +2643,394 @@ fn normalize_workbook_target(target: &str) -> String {
 fn metadata_error(error: impl std::fmt::Display) -> i32 {
     set_last_error(format!("failed to read XLSX metadata: {error}"));
     ERROR_QUERY
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_png_picture(
+    path: &str,
+    sheet_name: Option<&str>,
+    cell_address: &str,
+    image: &[u8],
+    width_px: u32,
+    height_px: u32,
+    anchor_type: u8,
+    location_x: i32,
+    location_y: i32,
+) -> Result<(), i32> {
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !image.starts_with(PNG_SIGNATURE) {
+        set_last_error("only PNG picture data is currently supported");
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    if anchor_type > 2 {
+        set_last_error("anchor_type must be 0 (one-cell), 1 (absolute), or 2 (two-cell)");
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let column = cell_column_index(cell_address)? - 1;
+    let row = cell_row_index(cell_address)? - 1;
+    let file = File::open(path).map_err(write_error)?;
+    let mut archive = ZipArchive::new(file).map_err(write_error)?;
+    let names = archive.file_names().map(str::to_owned).collect::<Vec<_>>();
+    let workbook = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let workbook_rels = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let sheets = workbook_sheets(&workbook)?;
+    let relationship_id = match sheet_name {
+        Some(name) => sheets
+            .iter()
+            .find(|(sheet, _)| sheet.eq_ignore_ascii_case(name))
+            .map(|(_, relationship)| relationship),
+        None => sheets.first().map(|(_, relationship)| relationship),
+    }
+    .ok_or_else(|| {
+        set_last_error(format!(
+            "worksheet '{}' was not found",
+            sheet_name.unwrap_or("<first>")
+        ));
+        ERROR_QUERY
+    })?;
+    let targets = workbook_relationship_targets(&workbook_rels)?;
+    let worksheet_path =
+        normalize_workbook_target(targets.get(relationship_id).ok_or_else(|| {
+            set_last_error(format!(
+                "workbook relationship '{relationship_id}' was not found"
+            ));
+            ERROR_QUERY
+        })?);
+    let worksheet_name = worksheet_path.rsplit('/').next().ok_or_else(|| {
+        set_last_error("worksheet path has no file name");
+        ERROR_QUERY
+    })?;
+    let worksheet_rels_path = format!("xl/worksheets/_rels/{worksheet_name}.rels");
+    let mut worksheet_xml = String::from_utf8(read_zip_entry(&mut archive, &worksheet_path)?)
+        .map_err(metadata_error)?;
+    let mut worksheet_rels = read_optional_zip_entry(&mut archive, &worksheet_rels_path)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(metadata_error)?
+        .unwrap_or_else(empty_relationships_xml);
+
+    let existing_drawing_id = drawing_relationship_id(worksheet_xml.as_bytes())?;
+    let (drawing_path, drawing_rel_id) = if let Some(id) = existing_drawing_id {
+        let targets = workbook_relationship_targets(worksheet_rels.as_bytes())?;
+        let target = targets.get(&id).ok_or_else(|| {
+            set_last_error(format!(
+                "worksheet drawing relationship '{id}' was not found"
+            ));
+            ERROR_QUERY
+        })?;
+        (normalize_part_target(&worksheet_path, target), id)
+    } else {
+        let index = next_numbered_part(&names, "xl/drawings/drawing", ".xml");
+        let drawing_path = format!("xl/drawings/drawing{index}.xml");
+        let relationship_id = next_relationship_id(worksheet_rels.as_bytes())?;
+        worksheet_xml = ensure_relationship_namespace(&worksheet_xml);
+        worksheet_xml = insert_before(
+            &worksheet_xml,
+            "</worksheet>",
+            &format!("<drawing r:id=\"{relationship_id}\"/>"),
+        )?;
+        worksheet_rels = append_relationship(
+            &worksheet_rels,
+            &relationship_id,
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",
+            &format!("../drawings/drawing{index}.xml"),
+        )?;
+        (drawing_path, relationship_id)
+    };
+    let _ = drawing_rel_id;
+
+    let drawing_name = drawing_path.rsplit('/').next().expect("drawing file name");
+    let drawing_rels_path = format!("xl/drawings/_rels/{drawing_name}.rels");
+    let mut drawing_xml = read_optional_zip_entry(&mut archive, &drawing_path)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(metadata_error)?
+        .unwrap_or_else(empty_drawing_xml);
+    let mut drawing_rels = read_optional_zip_entry(&mut archive, &drawing_rels_path)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(metadata_error)?
+        .unwrap_or_else(empty_relationships_xml);
+    let image_index = next_numbered_part(&names, "xl/media/image", ".png");
+    let image_path = format!("xl/media/image{image_index}.png");
+    let image_rel_id = next_relationship_id(drawing_rels.as_bytes())?;
+    drawing_rels = append_relationship(
+        &drawing_rels,
+        &image_rel_id,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        &format!("../media/image{image_index}.png"),
+    )?;
+    let picture_id = drawing_anchor_count(drawing_xml.as_bytes())? + 2;
+    let anchor = picture_anchor_xml(
+        column,
+        row,
+        width_px,
+        height_px,
+        &image_rel_id,
+        picture_id,
+        anchor_type,
+        location_x,
+        location_y,
+    );
+    drawing_xml = insert_before(&drawing_xml, "</xdr:wsDr>", &anchor)?;
+
+    let mut content_types = String::from_utf8(read_zip_entry(&mut archive, "[Content_Types].xml")?)
+        .map_err(metadata_error)?;
+    if !content_types.contains("ContentType=\"image/png\"") {
+        content_types = insert_before(
+            &content_types,
+            "</Types>",
+            "<Default Extension=\"png\" ContentType=\"image/png\"/>",
+        )?;
+    }
+    let drawing_part = format!("/{drawing_path}");
+    if !content_types.contains(&drawing_part) {
+        content_types = insert_before(
+            &content_types,
+            "</Types>",
+            &format!(
+                "<Override PartName=\"{drawing_part}\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>"
+            ),
+        )?;
+    }
+
+    let mut replacements = BTreeMap::new();
+    replacements.insert(worksheet_path, worksheet_xml.into_bytes());
+    replacements.insert(worksheet_rels_path, worksheet_rels.into_bytes());
+    replacements.insert(drawing_path, drawing_xml.into_bytes());
+    replacements.insert(drawing_rels_path, drawing_rels.into_bytes());
+    replacements.insert("[Content_Types].xml".to_owned(), content_types.into_bytes());
+    replacements.insert(image_path, image.to_vec());
+    rewrite_package(path, archive, replacements)
+}
+
+fn read_optional_zip_entry<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    path: &str,
+) -> Result<Option<Vec<u8>>, i32> {
+    match archive.by_name(path) {
+        Ok(mut entry) => {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(write_error)?;
+            Ok(Some(bytes))
+        }
+        Err(zip::result::ZipError::FileNotFound) => Ok(None),
+        Err(error) => Err(write_error(error)),
+    }
+}
+
+fn rewrite_package(
+    path: &str,
+    mut archive: ZipArchive<File>,
+    replacements: BTreeMap<String, Vec<u8>>,
+) -> Result<(), i32> {
+    let destination = Path::new(path);
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".miniexcel-picture-")
+        .suffix(".xlsx")
+        .tempfile_in(parent)
+        .map_err(write_error)?;
+    {
+        let mut writer = ZipWriter::new(temporary.as_file_mut());
+        let mut written = std::collections::HashSet::new();
+        for index in 0..archive.len() {
+            let entry = archive.by_index_raw(index).map_err(write_error)?;
+            let name = entry.name().to_owned();
+            if let Some(replacement) = replacements.get(&name) {
+                writer
+                    .start_file(&name, entry.options())
+                    .map_err(write_error)?;
+                writer.write_all(replacement).map_err(write_error)?;
+            } else {
+                writer.raw_copy_file(entry).map_err(write_error)?;
+            }
+            written.insert(name);
+        }
+        for (name, bytes) in &replacements {
+            if !written.contains(name) {
+                writer
+                    .start_file(
+                        name,
+                        SimpleFileOptions::default()
+                            .compression_method(CompressionMethod::Deflated),
+                    )
+                    .map_err(write_error)?;
+                writer.write_all(bytes).map_err(write_error)?;
+            }
+        }
+        writer.finish().map_err(write_error)?;
+    }
+    drop(archive);
+    temporary.as_file().sync_all().map_err(write_error)?;
+    let staging = temporary.into_temp_path();
+    publish_staged_file(staging.as_ref(), destination)
+}
+
+fn drawing_relationship_id(worksheet: &[u8]) -> Result<Option<String>, i32> {
+    let mut reader = XmlReader::from_reader(worksheet);
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event) | Event::Empty(event)
+                if event.local_name().as_ref() == b"drawing" =>
+            {
+                return xml_attribute(&reader, &event, b"r:id");
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+fn drawing_anchor_count(drawing: &[u8]) -> Result<usize, i32> {
+    let mut reader = XmlReader::from_reader(drawing);
+    let mut count = 0;
+    loop {
+        match reader.read_event().map_err(metadata_error)? {
+            Event::Start(event)
+                if matches!(
+                    event.local_name().as_ref(),
+                    b"oneCellAnchor" | b"twoCellAnchor" | b"absoluteAnchor"
+                ) =>
+            {
+                count += 1
+            }
+            Event::Eof => return Ok(count),
+            _ => {}
+        }
+    }
+}
+
+fn next_relationship_id(relationships: &[u8]) -> Result<String, i32> {
+    let targets = workbook_relationship_targets(relationships)?;
+    let mut index = 1;
+    loop {
+        let candidate = format!("rId{index}");
+        if !targets.contains_key(&candidate) {
+            return Ok(candidate);
+        }
+        index += 1;
+    }
+}
+
+fn next_numbered_part(names: &[String], prefix: &str, suffix: &str) -> usize {
+    let mut index = 1;
+    loop {
+        let candidate = format!("{prefix}{index}{suffix}");
+        if !names.iter().any(|name| name == &candidate) {
+            return index;
+        }
+        index += 1;
+    }
+}
+
+fn append_relationship(
+    xml: &str,
+    id: &str,
+    relationship_type: &str,
+    target: &str,
+) -> Result<String, i32> {
+    insert_before(
+        xml,
+        "</Relationships>",
+        &format!("<Relationship Id=\"{id}\" Type=\"{relationship_type}\" Target=\"{target}\"/>"),
+    )
+}
+
+fn insert_before(xml: &str, closing: &str, value: &str) -> Result<String, i32> {
+    let index = xml.rfind(closing).ok_or_else(|| {
+        set_last_error(format!("XML closing element '{closing}' was not found"));
+        ERROR_WRITE
+    })?;
+    let mut result = String::with_capacity(xml.len() + value.len());
+    result.push_str(&xml[..index]);
+    result.push_str(value);
+    result.push_str(&xml[index..]);
+    Ok(result)
+}
+
+fn ensure_relationship_namespace(xml: &str) -> String {
+    if xml.contains("xmlns:r=") {
+        return xml.to_owned();
+    }
+    xml.replacen(
+        "<worksheet ",
+        "<worksheet xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+        1,
+    )
+}
+
+fn normalize_part_target(source_part: &str, target: &str) -> String {
+    let mut parts = source_part
+        .rsplit_once('/')
+        .map_or(Vec::new(), |(parent, _)| {
+            parent.split('/').collect::<Vec<_>>()
+        });
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value),
+        }
+    }
+    parts.join("/")
+}
+
+fn empty_relationships_xml() -> String {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>".to_owned()
+}
+
+fn empty_drawing_xml() -> String {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"></xdr:wsDr>".to_owned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn picture_anchor_xml(
+    column: usize,
+    row: usize,
+    width_px: u32,
+    height_px: u32,
+    relationship_id: &str,
+    picture_id: usize,
+    anchor_type: u8,
+    location_x: i32,
+    location_y: i32,
+) -> String {
+    let extent = format!(
+        "<xdr:ext cx=\"{}\" cy=\"{}\"/>",
+        u64::from(width_px) * 9525,
+        u64::from(height_px) * 9525
+    );
+    let position = match anchor_type {
+        1 => format!(
+            "<xdr:pos x=\"{}\" y=\"{}\"/>{extent}",
+            i64::from(location_x) * 9525,
+            i64::from(location_y) * 9525
+        ),
+        2 => format!(
+            "<xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>",
+            column + 1,
+            row + 1
+        ),
+        _ => format!(
+            "<xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>{extent}"
+        ),
+    };
+    let anchor = match anchor_type {
+        1 => "absoluteAnchor",
+        2 => "twoCellAnchor",
+        _ => "oneCellAnchor",
+    };
+    let edit_as = if anchor_type == 2 {
+        " editAs=\"twoCell\""
+    } else {
+        ""
+    };
+    format!(
+        "<xdr:{anchor}{edit_as}>{position}<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{picture_id}\" name=\"Image{picture_id}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"{relationship_id}\" cstate=\"print\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:{anchor}>"
+    )
 }
 
 fn decode_sheets(bytes: &[u8]) -> Result<Vec<(String, Vec<DynamicRow>)>, i32> {

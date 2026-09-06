@@ -192,6 +192,7 @@ static int RunSuite(int lifecycleIterations, int maxPrivateGrowthMb)
     VerifyTypedExports();
     VerifyInsertAndCopy();
     VerifyTemplateFill();
+    VerifyPictures();
     VerifyWorkbookMutations(workbookPath);
     VerifyLifecycle(workbookPath, lifecycleIterations, maxPrivateGrowthMb);
     Console.WriteLine("MiniExcelRust parity and lifecycle suite passed.");
@@ -339,7 +340,7 @@ static void VerifyCompatibilityFacade(string path)
   var methodNames = facade.GetMethods().Select(method => method.Name).ToHashSet(StringComparer.Ordinal);
   foreach (var required in new[]
   {
-    "Query", "QueryAsync", "QueryRange", "QueryRangeAsync", "SaveAs", "SaveAsAsync",
+    "AddPicture", "AddPictureAsync", "Query", "QueryAsync", "QueryRange", "QueryRangeAsync", "SaveAs", "SaveAsAsync",
     "Insert", "SaveAsByTemplate", "MergeSameCells", "MergeSameCellsAsync", "GetReader",
     "QueryAsDataTable", "QueryAsDataTableAsync", "GetSheetNames", "GetSheetInformations",
     "GetSheetDimensions", "GetColumns", "GetColumnsAsync",
@@ -683,9 +684,13 @@ static void VerifyTypedExports()
   var xlsxPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-export-{Guid.NewGuid():N}.xlsx");
   var asyncPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-async-export-{Guid.NewGuid():N}.xlsx");
   var cancelledPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-cancelled-export-{Guid.NewGuid():N}.xlsx");
+  var nativeCancelledPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-native-cancelled-{Guid.NewGuid():N}.xlsx");
   var csvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-typed-export-{Guid.NewGuid():N}.csv");
+  var asyncCsvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-async-export-{Guid.NewGuid():N}.csv");
+  var cancelledCsvPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-cancelled-export-{Guid.NewGuid():N}.csv");
   var attributesPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-attribute-export-{Guid.NewGuid():N}.xlsx");
   var formatterPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-formatter-export-{Guid.NewGuid():N}.xlsx");
+  var formulaPath = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-formula-export-{Guid.NewGuid():N}.xlsx");
   var identifier = Guid.Parse("32a2fac7-2ce2-4683-a735-118fe7c4949b");
   var rows = new[]
   {
@@ -711,6 +716,39 @@ static void VerifyTypedExports()
     var rustCsv = MiniExcelRust.QueryCsv<TypedExportRow>(csvPath).Single();
     Require(rustCsv.Name == rows[0].Name && rustCsv.Identifier == identifier, "typed-export: CSV values differ.");
 
+    using (var csvStream = new MemoryStream())
+    {
+      written = MiniExcelRust.SaveAsCsv(csvStream, rows, leaveOpen: true);
+      Require(written == 1 && csvStream.CanWrite, "typed-export: CSV stream write failed.");
+      written = MiniExcelRust.AppendCsv(csvStream, rows, leaveOpen: true);
+      Require(written == 1, "typed-export: CSV stream append failed.");
+      csvStream.Position = 0;
+      Require(
+        MiniExcelRust.QueryCsv<TypedExportRow>(csvStream, leaveOpen: true).Count() == 2,
+        "typed-export: CSV stream row count differs.");
+    }
+
+    written = MiniExcelRust.SaveAsCsvAsync(asyncCsvPath, ProduceTypedRows(rows)).GetAwaiter().GetResult();
+    Require(written == 1, "typed-export: async CSV row count differs.");
+    Require(MiniExcelRust.QueryCsv<TypedExportRow>(asyncCsvPath).Single().Identifier == identifier, "typed-export: async CSV value differs.");
+
+    using var csvCancellation = new CancellationTokenSource();
+    var cancelled = false;
+    try
+    {
+      _ = MiniExcelRust.SaveAsCsvAsync(
+          cancelledCsvPath,
+          ProduceRowsAndCancel(csvCancellation),
+          cancellationToken: csvCancellation.Token)
+        .GetAwaiter()
+        .GetResult();
+    }
+    catch (OperationCanceledException)
+    {
+      cancelled = true;
+    }
+    Require(cancelled && !File.Exists(cancelledCsvPath), "typed-export: native CSV cancellation published a destination.");
+
     written = MiniExcelRust.SaveAsAsync(asyncPath, ProduceTypedRows(rows), sheetName: "Async")
       .GetAwaiter()
       .GetResult();
@@ -719,7 +757,7 @@ static void VerifyTypedExports()
 
     using var cancellation = new CancellationTokenSource();
     cancellation.Cancel();
-    var cancelled = false;
+    cancelled = false;
     try
     {
       _ = MiniExcelRust.SaveAsAsync(
@@ -734,6 +772,23 @@ static void VerifyTypedExports()
       cancelled = true;
     }
     Require(cancelled && !File.Exists(cancelledPath), "typed-export: cancellation published a destination.");
+
+    using var nativeCancellation = new CancellationTokenSource();
+    cancelled = false;
+    try
+    {
+      _ = MiniExcelRust.SaveAsAsync(
+          nativeCancelledPath,
+          ProduceRowsAndCancel(nativeCancellation),
+          cancellationToken: nativeCancellation.Token)
+        .GetAwaiter()
+        .GetResult();
+    }
+    catch (OperationCanceledException)
+    {
+      cancelled = true;
+    }
+    Require(cancelled && !File.Exists(nativeCancelledPath), "typed-export: native cancellation published a destination.");
 
     written = MiniExcelRust.SaveAs(
       attributesPath,
@@ -761,10 +816,21 @@ static void VerifyTypedExports()
     Require(
       formatterRows[0].ContainsKey("Formatted") && Equals(formatterRows[0]["Formatted"], "#9"),
       "typed-formatter: formatted value differs.");
+
+    var formulaOptions = new MiniExcelRustWriteOptions { SheetName = "Formula" };
+    formulaOptions.DynamicColumns["Formula"] = new MiniExcelRustDynamicColumn { IsFormula = true };
+    written = MiniExcelRust.SaveAs(
+      formulaPath,
+      new[] { new TypedFormulaRow { Left = 2, Right = 3, Formula = "=A2+B2" } },
+      formulaOptions);
+    Require(written == 1, "typed-formula: row count differs.");
+    var formulaXml = ReadZipEntryText(formulaPath, "xl/worksheets/sheet1.xml");
+    Require(formulaXml.Contains("<f>A2+B2</f>", StringComparison.Ordinal), "typed-formula: formula cell was not written.");
+    Require(!formulaXml.Contains("$=A2+B2", StringComparison.Ordinal), "typed-formula: template marker leaked.");
   }
   finally
   {
-    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, csvPath, attributesPath, formatterPath })
+    foreach (var path in new[] { xlsxPath, asyncPath, cancelledPath, nativeCancelledPath, csvPath, asyncCsvPath, cancelledCsvPath, attributesPath, formatterPath, formulaPath })
     {
       if (File.Exists(path))
         File.Delete(path);
@@ -779,6 +845,23 @@ static async IAsyncEnumerable<TypedExportRow> ProduceTypedRows(IEnumerable<Typed
     await Task.Yield();
     yield return row;
   }
+}
+
+static async IAsyncEnumerable<TypedExportRow> ProduceRowsAndCancel(CancellationTokenSource cancellation)
+{
+  for (var index = 0; index < 20_000; index++)
+  {
+    yield return new TypedExportRow
+    {
+      Name = $"row-{index}",
+      Count = index,
+      State = RowState.Ready,
+      Identifier = Guid.Empty,
+      When = new DateTime(2026, 9, 6)
+    };
+  }
+  cancellation.CancelAfter(1);
+  await Task.Yield();
 }
 
 static void CompareTypedExportRows(TypedExportRow expected, TypedExportRow actual, string scenario)
@@ -979,6 +1062,76 @@ static void VerifyTemplateFill()
   }
 }
 
+static void VerifyPictures()
+{
+  var path = Path.Combine(Path.GetTempPath(), $"miniexcel-rust-picture-{Guid.NewGuid():N}.xlsx");
+  var png = Convert.FromBase64String(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0kAAAAASUVORK5CYII=");
+  try
+  {
+    MiniExcelRust.SaveAs(
+      path,
+      new[] { new Dictionary<string, object?> { ["Name"] = "preserved" } });
+    MiniExcelRust.AddPicture(
+      path,
+      new MiniExcelRustPicture
+      {
+        ImageBytes = png,
+        CellAddress = "B2",
+        WidthPx = 40,
+        HeightPx = 40,
+        Anchor = MiniExcelRustPictureAnchor.OneCell
+      },
+      new MiniExcelRustPicture
+      {
+        ImageBytes = png,
+        CellAddress = "C3",
+        WidthPx = 45,
+        HeightPx = 45,
+        Anchor = MiniExcelRustPictureAnchor.Absolute,
+        LocationX = 20,
+        LocationY = 30
+      },
+      new MiniExcelRustPicture
+      {
+        ImageBytes = png,
+        CellAddress = "D4",
+        WidthPx = 50,
+        HeightPx = 50,
+        Anchor = MiniExcelRustPictureAnchor.TwoCell
+      });
+
+    using (var archive = ZipFile.OpenRead(path))
+    {
+      Require(archive.Entries.Count(entry => entry.FullName.StartsWith("xl/media/image", StringComparison.Ordinal)) == 3, "pictures: media count differs.");
+      Require(archive.GetEntry("xl/drawings/drawing1.xml") is not null, "pictures: drawing part missing.");
+      Require(archive.GetEntry("xl/drawings/_rels/drawing1.xml.rels") is not null, "pictures: drawing relationships missing.");
+    }
+    var drawing = ReadZipEntryText(path, "xl/drawings/drawing1.xml");
+    Require(drawing.Contains("oneCellAnchor", StringComparison.Ordinal), "pictures: one-cell anchor missing.");
+    Require(drawing.Contains("absoluteAnchor", StringComparison.Ordinal), "pictures: absolute anchor missing.");
+    Require(drawing.Contains("twoCellAnchor", StringComparison.Ordinal), "pictures: two-cell anchor missing.");
+    Require(Equals(MiniExcelRust.Query(path, true).Single()["Name"], "preserved"), "pictures: workbook data changed.");
+
+    using var stream = new MemoryStream();
+    stream.Write(File.ReadAllBytes(path));
+    stream.Position = 0;
+    MiniExcelRust.AddPicture(
+      stream,
+      leaveOpen: true,
+      new MiniExcelRustPicture { ImageBytes = png, CellAddress = "E5" });
+    Require(stream.CanRead, "pictures-stream: leaveOpen should preserve the stream.");
+    stream.Position = 0;
+    using var streamArchive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+    Require(streamArchive.Entries.Count(entry => entry.FullName.StartsWith("xl/media/image", StringComparison.Ordinal)) == 4, "pictures-stream: media count differs.");
+  }
+  finally
+  {
+    if (File.Exists(path))
+      File.Delete(path);
+  }
+}
+
 static void VerifyCsvParity(string path)
 {
   var managedConfiguration = new CsvConfiguration
@@ -1008,6 +1161,10 @@ static void VerifyCsvParity(string path)
   }
   var asyncRows = CollectAsync(MiniExcelRust.QueryCsvAsync(path, true, rustConfiguration)).GetAwaiter().GetResult();
   CompareRows(managedRows, asyncRows, "csv-async");
+  var asyncTypedCsv = CollectAsync(MiniExcelRust.QueryCsvAsync<TypedCsvRow>(path, configuration: rustConfiguration))
+    .GetAwaiter()
+    .GetResult();
+  Require(asyncTypedCsv.Count == managedTypedRows.Count, "csv-typed-async: row count differs.");
 
   var managedColumns = importer.GetColumnNames(path, true, managedConfiguration);
   var rustColumns = MiniExcelRust.GetCsvColumnNames(path, true, rustConfiguration);
@@ -1106,6 +1263,19 @@ static void VerifyParity(string path)
   CompareRows(managedRangeRows, rustRangeRows, "bounded-range");
   Require(rustRangeRows.Count == 1, $"bounded-range: expected 1 row, received {rustRangeRows.Count}.");
 
+  var managedNumericRange = importer.QueryRange(
+      path,
+      hasHeaderRow: true,
+      sheetName: "Data",
+      startRowIndex: 2,
+      startColumnIndex: 3,
+      endRowIndex: 3,
+      endColumnIndex: 4)
+    .Cast<IDictionary<string, object?>>()
+    .ToList();
+  var rustNumericRange = MiniExcelRust.QueryRange(path, true, "Data", 2, 3, 3, 4).ToList();
+  CompareRows(managedNumericRange, rustNumericRange, "numeric-range");
+
   var managedTableRows = QueryManagedTable(path, "Data", "DataTable").ToList();
   var rustTableRows = MiniExcelRust.QueryTable(path, "Data", "datatable").ToList();
   CompareRows(managedTableRows, rustTableRows, "named-table");
@@ -1190,6 +1360,20 @@ static void VerifyParity(string path)
   CompareTypedRows(managedTypedRows, asyncTypedRows, "async-typed-query");
   var asyncTableRows = CollectAsync(MiniExcelRust.QueryTableAsync(path, "Data", "DataTable")).GetAwaiter().GetResult();
   CompareRows(managedTableRows, asyncTableRows, "async-table-query");
+  var asyncTypedTableRows = CollectAsync(MiniExcelRust.QueryTableAsync<TypedTableRow>(path, "Data", "DataTable"))
+    .GetAwaiter()
+    .GetResult();
+  Require(asyncTypedTableRows.Count == 2, "async-typed-table: row count differs.");
+
+  using (var asyncStream = new MemoryStream(File.ReadAllBytes(path)))
+  {
+    var streamAsyncRows = CollectAsync(
+        MiniExcelRust.QueryAsync(asyncStream, true, "Sheet1", leaveOpen: true))
+      .GetAwaiter()
+      .GetResult();
+    CompareRows(rows, streamAsyncRows, "async-stream-query");
+    Require(asyncStream.CanRead, "async-stream-query: leaveOpen should preserve the stream.");
+  }
 
   using var cancellation = new CancellationTokenSource();
   cancellation.Cancel();
@@ -1838,6 +2022,13 @@ static void AddEntry(ZipArchive archive, string name, string contents)
 
     [System.ComponentModel.DisplayName("Readonly")]
     public int Count { get; } = count;
+  }
+
+  internal sealed class TypedFormulaRow
+  {
+    public int Left { get; set; }
+    public int Right { get; set; }
+    public string? Formula { get; set; }
   }
 
   internal enum RowState
