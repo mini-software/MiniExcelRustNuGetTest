@@ -1,9 +1,9 @@
 {
   "Metadata": {
-    "TimestampUtc": "2026-09-07T08:19:09.2680311Z",
-    "OperatingSystem": "Microsoft Windows 10.0.26100",
-    "Architecture": "X64",
-    "Rid": "win-x64",
+    "TimestampUtc": "2026-09-07T08:18:57.7571632Z",
+    "OperatingSystem": "Microsoft Windows 10.0.26200",
+    "Architecture": "Arm64",
+    "Rid": "win-arm64",
     "DotNetSdk": "10.0.400",
     "TargetFramework": "net10.0",
     "DotNetRuntime": ".NET 10.0.11",
@@ -12,8 +12,8 @@
     "RustVersion": "1.85.0",
     "Rows": 100000,
     "Columns": 10,
-    "WorkbookSha256": "dc0a966e16a37a8ba45f5955d0f00d9694fe0f83450ec59694746c057d593430",
-    "PackageSha256": "5661ca79f9904d36efc58db724336a43929aa833a2682b9f2be219223f39f162",
+    "WorkbookSha256": "238e5b096ebfdb53f4e3fb147a0d53312eeee7bd5667f2380d260e8c0fadb6b3",
+    "PackageSha256": "503461459b5380743e0c09ac8568b01c008617a597ecc819bed25dbdf24d531e",
     "Iterations": 5
   },
   "Results": [
@@ -25,11 +25,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 2949.43,
-      "FirstRowMs": 1059.85,
-      "AllocatedMB": 1552.97,
-      "PeakWorkingSetMB": 55.58,
-      "PeakPrivateMB": 29.13
+      "ElapsedMs": 3128.34,
+      "FirstRowMs": 1019.31,
+      "AllocatedMB": 1552.28,
+      "PeakWorkingSetMB": 105.68,
+      "PeakPrivateMB": 77.24
     },
     {
       "Scenario": "Cold",
@@ -39,11 +39,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 1538.38,
-      "FirstRowMs": 484.14,
-      "AllocatedMB": 113.09,
-      "PeakWorkingSetMB": 43.1,
-      "PeakPrivateMB": 24.17
+      "ElapsedMs": 1108.57,
+      "FirstRowMs": 350.08,
+      "AllocatedMB": 114.83,
+      "PeakWorkingSetMB": 94.0,
+      "PeakPrivateMB": 73.28
     },
     {
       "Scenario": "Cold",
@@ -53,11 +53,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 1518.18,
-      "FirstRowMs": 465.28,
-      "AllocatedMB": 113.15,
-      "PeakWorkingSetMB": 43.32,
-      "PeakPrivateMB": 24.19
+      "ElapsedMs": 1097.52,
+      "FirstRowMs": 350.05,
+      "AllocatedMB": 114.26,
+      "PeakWorkingSetMB": 93.36,
+      "PeakPrivateMB": 73.23
     },
     {
       "Scenario": "Cold",
@@ -67,11 +67,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 2730.15,
-      "FirstRowMs": 959.16,
-      "AllocatedMB": 1551.99,
-      "PeakWorkingSetMB": 55.8,
-      "PeakPrivateMB": 29.07
+      "ElapsedMs": 3129.02,
+      "FirstRowMs": 1016.67,
+      "AllocatedMB": 1552.46,
+      "PeakWorkingSetMB": 105.63,
+      "PeakPrivateMB": 76.89
     },
     {
       "Scenario": "Cold",
@@ -81,11 +81,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 2740.78,
-      "FirstRowMs": 995.07,
-      "AllocatedMB": 1551.76,
-      "PeakWorkingSetMB": 55.87,
-      "PeakPrivateMB": 28.88
+      "ElapsedMs": 3106.63,
+      "FirstRowMs": 1004.76,
+      "AllocatedMB": 1554.13,
+      "PeakWorkingSetMB": 105.72,
+      "PeakPrivateMB": 76.89
     },
     {
       "Scenario": "Cold",
@@ -95,11 +95,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 1487.54,
-      "FirstRowMs": 457.91,
-      "AllocatedMB": 113.28,
-      "PeakWorkingSetMB": 42.44,
-      "PeakPrivateMB": 24.15
+      "ElapsedMs": 1100.91,
+      "FirstRowMs": 350.32,
+      "AllocatedMB": 114.3,
+      "PeakWorkingSetMB": 93.66,
+      "PeakPrivateMB": 73.32
     },
     {
       "Scenario": "Cold",
@@ -109,11 +109,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 1506.99,
-      "FirstRowMs": 454.45,
-      "AllocatedMB": 112.9,
-      "PeakWorkingSetMB": 43.54,
-      "PeakPrivateMB": 24.16
+      "ElapsedMs": 1112.83,
+      "FirstRowMs": 349.3,
+      "AllocatedMB": 114.26,
+      "PeakWorkingSetMB": 94.04,
+      "PeakPrivateMB": 73.38
     },
     {
       "Scenario": "Cold",
@@ -123,11 +123,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 2654.57,
-      "FirstRowMs": 934.84,
-      "AllocatedMB": 1538.93,
-      "PeakWorkingSetMB": 55.79,
-      "PeakPrivateMB": 28.9
+      "ElapsedMs": 3177.87,
+      "FirstRowMs": 1016.08,
+      "AllocatedMB": 1553.88,
+      "PeakWorkingSetMB": 105.54,
+      "PeakPrivateMB": 76.96
     },
     {
       "Scenario": "Cold",
@@ -137,11 +137,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 2690.99,
-      "FirstRowMs": 1004.99,
-      "AllocatedMB": 1551.02,
-      "PeakWorkingSetMB": 55.32,
-      "PeakPrivateMB": 29.06
+      "ElapsedMs": 3130.67,
+      "FirstRowMs": 1009.38,
+      "AllocatedMB": 1554.12,
+      "PeakWorkingSetMB": 105.26,
+      "PeakPrivateMB": 76.96
     },
     {
       "Scenario": "Cold",
@@ -151,11 +151,11 @@
       "Passes": 1,
       "Rows": 100000,
       "Cells": 1000000,
-      "ElapsedMs": 1516.87,
-      "FirstRowMs": 451.43,
-      "AllocatedMB": 112.78,
-      "PeakWorkingSetMB": 42.37,
-      "PeakPrivateMB": 24.24
+      "ElapsedMs": 1092.84,
+      "FirstRowMs": 349.08,
+      "AllocatedMB": 115.17,
+      "PeakWorkingSetMB": 94.16,
+      "PeakPrivateMB": 73.37
     },
     {
       "Scenario": "Warm",
@@ -165,11 +165,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 5145.99,
-      "FirstRowMs": 502.79,
-      "AllocatedMB": 4674.55,
-      "PeakWorkingSetMB": 59.55,
-      "PeakPrivateMB": 32.93
+      "ElapsedMs": 6606.21,
+      "FirstRowMs": 536.12,
+      "AllocatedMB": 4674.19,
+      "PeakWorkingSetMB": 109.45,
+      "PeakPrivateMB": 80.68
     },
     {
       "Scenario": "Warm",
@@ -179,11 +179,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 4092.09,
-      "FirstRowMs": 443.53,
+      "ElapsedMs": 2921.07,
+      "FirstRowMs": 340.29,
       "AllocatedMB": 304.99,
-      "PeakWorkingSetMB": 46.42,
-      "PeakPrivateMB": 28.38
+      "PeakWorkingSetMB": 98.1,
+      "PeakPrivateMB": 77.91
     },
     {
       "Scenario": "Warm",
@@ -193,11 +193,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 4078.8,
-      "FirstRowMs": 437.27,
+      "ElapsedMs": 2906.28,
+      "FirstRowMs": 341.03,
       "AllocatedMB": 304.99,
-      "PeakWorkingSetMB": 47.43,
-      "PeakPrivateMB": 28.41
+      "PeakWorkingSetMB": 98.12,
+      "PeakPrivateMB": 77.93
     },
     {
       "Scenario": "Warm",
@@ -207,11 +207,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 5105.41,
-      "FirstRowMs": 481.14,
-      "AllocatedMB": 4674.55,
-      "PeakWorkingSetMB": 59.21,
-      "PeakPrivateMB": 32.93
+      "ElapsedMs": 6584.84,
+      "FirstRowMs": 539.48,
+      "AllocatedMB": 4674.2,
+      "PeakWorkingSetMB": 109.0,
+      "PeakPrivateMB": 80.32
     },
     {
       "Scenario": "Warm",
@@ -221,11 +221,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 5222.12,
-      "FirstRowMs": 519.03,
-      "AllocatedMB": 4674.55,
-      "PeakWorkingSetMB": 58.69,
-      "PeakPrivateMB": 32.36
+      "ElapsedMs": 6593.68,
+      "FirstRowMs": 533.75,
+      "AllocatedMB": 4674.21,
+      "PeakWorkingSetMB": 108.94,
+      "PeakPrivateMB": 80.66
     },
     {
       "Scenario": "Warm",
@@ -235,11 +235,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 4076.84,
-      "FirstRowMs": 444.68,
+      "ElapsedMs": 2913.07,
+      "FirstRowMs": 340.47,
       "AllocatedMB": 304.99,
-      "PeakWorkingSetMB": 48.02,
-      "PeakPrivateMB": 28.4
+      "PeakWorkingSetMB": 98.69,
+      "PeakPrivateMB": 77.9
     },
     {
       "Scenario": "Warm",
@@ -249,11 +249,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 4022.75,
-      "FirstRowMs": 438.58,
+      "ElapsedMs": 2973.33,
+      "FirstRowMs": 343.3,
       "AllocatedMB": 304.99,
-      "PeakWorkingSetMB": 47.25,
-      "PeakPrivateMB": 28.43
+      "PeakWorkingSetMB": 98.05,
+      "PeakPrivateMB": 77.88
     },
     {
       "Scenario": "Warm",
@@ -263,11 +263,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 5264.88,
-      "FirstRowMs": 496.76,
-      "AllocatedMB": 4674.55,
-      "PeakWorkingSetMB": 58.73,
-      "PeakPrivateMB": 32.29
+      "ElapsedMs": 6607.17,
+      "FirstRowMs": 539.56,
+      "AllocatedMB": 4674.19,
+      "PeakWorkingSetMB": 109.95,
+      "PeakPrivateMB": 80.96
     },
     {
       "Scenario": "Warm",
@@ -277,11 +277,11 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 5313.24,
-      "FirstRowMs": 474.39,
-      "AllocatedMB": 4674.56,
-      "PeakWorkingSetMB": 58.75,
-      "PeakPrivateMB": 32.24
+      "ElapsedMs": 6593.2,
+      "FirstRowMs": 535.22,
+      "AllocatedMB": 4674.2,
+      "PeakWorkingSetMB": 109.32,
+      "PeakPrivateMB": 80.86
     },
     {
       "Scenario": "Warm",
@@ -291,22 +291,22 @@
       "Passes": 3,
       "Rows": 300000,
       "Cells": 3000000,
-      "ElapsedMs": 4070.97,
-      "FirstRowMs": 441.3,
+      "ElapsedMs": 2957.16,
+      "FirstRowMs": 341.77,
       "AllocatedMB": 304.99,
-      "PeakWorkingSetMB": 47.93,
-      "PeakPrivateMB": 28.39
+      "PeakWorkingSetMB": 97.6,
+      "PeakPrivateMB": 78.0
     }
   ],
   "Summary": [
     {
       "Scenario": "Cold",
       "Runtime": "MiniExcelV2",
-      "ElapsedMs": 2753.18,
-      "FirstRowMs": 990.78,
-      "AllocatedMB": 1549.33,
-      "PeakWorkingSetMB": 55.67,
-      "PeakPrivateMB": 29.01,
+      "ElapsedMs": 3134.51,
+      "FirstRowMs": 1013.24,
+      "AllocatedMB": 1553.37,
+      "PeakWorkingSetMB": 105.57,
+      "PeakPrivateMB": 76.99,
       "Speedup": 1,
       "AllocationReductionPercent": 0,
       "WorkingSetReductionPercent": 0
@@ -314,23 +314,23 @@
     {
       "Scenario": "Cold",
       "Runtime": "MiniExcelRust",
-      "ElapsedMs": 1513.59,
-      "FirstRowMs": 462.64,
-      "AllocatedMB": 113.04,
-      "PeakWorkingSetMB": 42.95,
-      "PeakPrivateMB": 24.18,
-      "Speedup": 1.82,
-      "AllocationReductionPercent": 92.7,
-      "WorkingSetReductionPercent": 22.8
+      "ElapsedMs": 1102.53,
+      "FirstRowMs": 349.77,
+      "AllocatedMB": 114.56,
+      "PeakWorkingSetMB": 93.84,
+      "PeakPrivateMB": 73.32,
+      "Speedup": 2.84,
+      "AllocationReductionPercent": 92.6,
+      "WorkingSetReductionPercent": 11.1
     },
     {
       "Scenario": "Warm",
       "Runtime": "MiniExcelV2",
-      "ElapsedMs": 5210.33,
-      "FirstRowMs": 494.82,
-      "AllocatedMB": 4674.55,
-      "PeakWorkingSetMB": 58.99,
-      "PeakPrivateMB": 32.55,
+      "ElapsedMs": 6597.02,
+      "FirstRowMs": 536.83,
+      "AllocatedMB": 4674.2,
+      "PeakWorkingSetMB": 109.33,
+      "PeakPrivateMB": 80.7,
       "Speedup": 1,
       "AllocationReductionPercent": 0,
       "WorkingSetReductionPercent": 0
@@ -338,14 +338,14 @@
     {
       "Scenario": "Warm",
       "Runtime": "MiniExcelRust",
-      "ElapsedMs": 4068.29,
-      "FirstRowMs": 441.07,
+      "ElapsedMs": 2934.18,
+      "FirstRowMs": 341.37,
       "AllocatedMB": 304.99,
-      "PeakWorkingSetMB": 47.41,
-      "PeakPrivateMB": 28.4,
-      "Speedup": 1.28,
+      "PeakWorkingSetMB": 98.11,
+      "PeakPrivateMB": 77.92,
+      "Speedup": 2.25,
       "AllocationReductionPercent": 93.5,
-      "WorkingSetReductionPercent": 19.6
+      "WorkingSetReductionPercent": 10.3
     }
   ]
 }
