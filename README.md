@@ -4,8 +4,9 @@
 [MiniExcel for Rust](https://github.com/mini-software/MiniExcel-Rust) through a small,
 versioned C ABI.
 
-> This repository and package are experimental. The initial API supports synchronous,
-> path-based dynamic XLSX queries.
+> This repository and package are experimental. The current API supports Rust-backed XLSX and
+> CSV reads and writes, bounded ranges, named tables, workbook metadata, templates, fluent
+> mapping, and managed `DataTable`/`IDataReader` adapters.
 
 ## Install
 
@@ -35,6 +36,8 @@ foreach (var row in MiniExcelRust.Query("input.xlsx", useHeaderRow: true))
 {
     Console.WriteLine(row["Name"]);
 }
+
+var typedRows = MiniExcelRust.Query<MyRow>("input.xlsx");
 ```
 
 `Query` accepts `path`, `useHeaderRow`, `sheetName`, and `startCell`. Each streamed row is
@@ -52,6 +55,66 @@ var rows = MiniExcelRust.Query(
 Rows are streamed in bounded batches across the native boundary. Disposing the enumerator
 early closes the native query handle. Normal `foreach` enumeration disposes it automatically;
 code that manually obtains an enumerator should wrap it in `using`.
+
+Additional read APIs include:
+
+```csharp
+var names = MiniExcelRust.GetSheetNames("input.xlsx");
+var dimensions = MiniExcelRust.GetSheetDimensions("input.xlsx");
+var comments = MiniExcelRust.RetrieveComments("input.xlsx", "Data");
+var tableRows = MiniExcelRust.QueryTable("input.xlsx", "Data", "Table1");
+var rangeRows = MiniExcelRust.QueryRange("input.xlsx", true, "Data", "C2", "F100");
+var dataTable = MiniExcelRust.QueryAsDataTable("input.xlsx", hasHeaderRow: true);
+
+var written = MiniExcelRust.SaveAs(
+    "output.xlsx",
+    new[]
+    {
+        new Dictionary<string, object?> { ["Name"] = "alpha", ["Value"] = 42d }
+    });
+
+var csvRows = MiniExcelRust.QueryCsv(
+    "input.csv",
+    useHeaderRow: true,
+    new MiniExcelRustCsvReadOptions { Delimiter = ';' });
+
+MiniExcelRust.SaveAsCsv(
+    "output.csv",
+    new[] { new Dictionary<string, object?> { ["Name"] = "alpha" } });
+
+MiniExcelRust.FillTemplate(
+    "report.xlsx",
+    "template.xlsx",
+    new { title = "Quarterly report", items = new[] { new { name = "Ada" } } });
+```
+
+Fluent mapping supports exact cells, formats, formulas, spaced vertical collections, and nested
+object collections. The same plan can export a workbook, read it back, or overlay values onto an
+existing template while preserving unrelated package parts and existing target-cell styles:
+
+```csharp
+var mapping = new MiniExcelRustMapping<Report>().ToWorksheet("Report");
+mapping.Property(report => report.Title).ToCell("A1");
+mapping.Collection(report => report.Items)
+    .StartAt("A3")
+    .WithSpacing(1)
+    .WithItemMapping<ReportItem>(item =>
+    {
+        item.Property(value => value.Name).ToCell("A3");
+        item.Property(value => value.Amount).ToCell("B3").WithFormat("#,##0.00");
+    });
+
+MiniExcelRustMappingExtensions.ExportMapped("report.xlsx", reports, mapping);
+var report = MiniExcelRustMappingExtensions.ReadMapped<Report>("report.xlsx", mapping);
+MiniExcelRustMappingExtensions.FillMappedTemplate(
+    "filled.xlsx", "template.xlsx", reports, mapping);
+```
+
+Stream overloads stage input to a temporary file so the Rust engine can retain its bounded-memory
+path iterator. They honor `leaveOpen` and remove the temporary file on completion, failure, or
+early enumeration disposal. Native stream callbacks are planned to remove this staging step.
+
+See [the live parity matrix](docs/parity-matrix.md) for verified APIs and known gaps.
 
 ## Supported Platforms
 
@@ -83,11 +146,25 @@ dotnet build ./src/MiniExcelRust/MiniExcelRust.csproj -c Release
 ./build/Test-Package.ps1 -Rid win-x64
 ```
 
+Use the local MiniExcel checkout as the read-only behavior oracle instead of the published package:
+
+```powershell
+./build/Test-Package.ps1 -Rid win-x64 -MiniExcelSourceRoot D:\git\MiniExcel
+```
+
+The comments contract can also be checked against the shared Rust fixture after packing:
+
+```powershell
+dotnet run --project .\tests\MiniExcelRust.PackageTests -c Release -- comments `
+    D:\git\MiniExcel-Rust\tests\data\xlsx\TestCommentsAndNotes.xlsx sheet1
+```
+
 `Test-Package.ps1` builds the native library, packs `MiniExcelRust`, restores a separate
 consumer from the local package feed, and verifies equivalent queries against MiniExcel.
 
-GitHub CI runs those header, headerless, sheet, start-cell, Unicode, boolean, null, numeric,
-full-enumeration, and early-disposal queries on all eight supported RIDs. Each platform also
+GitHub CI runs header, headerless, sheet, range, named-table, metadata, stream, CSV, Unicode,
+boolean, null, numeric, full-enumeration, and early-disposal queries on all eight supported RIDs.
+Each platform also
 runs 5,000 lifecycle iterations and fails when private memory grows by more than 32 MB, when
 the native handle/file-descriptor count grows by more than four, or when the workbook cannot
 be reopened exclusively. This is a bounded resource-growth regression test rather than a
@@ -101,15 +178,26 @@ same generated XLSX file and query options. The scheduled and manually dispatche
 workflow runs on Windows, Linux, and macOS for x64 and Arm64; musl remains covered by the
 Alpine correctness and lifecycle job because GitHub does not provide native musl runners.
 
-The latest checked-in cross-platform summary and per-RID reports are in the
-[benchmark results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md).
-Each report includes elapsed time, first-row latency, managed allocation, peak process memory,
-environment metadata, and a JSON file containing all raw iterations and hashes.
+### Latest Results
 
-After all scheduled benchmarks pass on the default branch, the workflow updates
-`docs/benchmarks/` through an `automation/benchmark-results` pull request. Repeated runs refresh
-the same PR instead of committing directly to the protected branch. Repository settings must
-allow GitHub Actions to create pull requests.
+<!-- benchmark-summary:start -->
+_Last updated (UTC): 2026-09-05 14:05:30_
+
+| RID | Scenario | MiniExcel (ms) | MiniExcelRust (ms) | Speedup | Allocation reduction | Working-set reduction |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| win-x64 | Cold | 2891.79 | 1041.49 | 2.78x | 92.5% | 20.3% |
+| win-x64 | Warm | 6136.27 | 2770.39 | 2.21x | 93.5% | 19.3% |
+
+[Full reports and raw results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md)
+<!-- benchmark-summary:end -->
+
+Each full report includes elapsed time, first-row latency, managed allocation, peak process
+memory, environment metadata, and a JSON file containing all raw iterations and hashes.
+
+After all scheduled benchmarks pass on the default branch, the workflow updates this summary
+and `docs/benchmarks/` through an `automation/benchmark-results` pull request. Repeated runs
+refresh the same PR instead of committing directly to the protected branch. Repository settings
+must allow GitHub Actions to create pull requests.
 
 Run the same reproducible comparison locally, or override `-MiniExcelVersion` to test a newer
 NuGet release:

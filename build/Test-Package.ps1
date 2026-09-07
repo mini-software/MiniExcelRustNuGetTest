@@ -7,6 +7,8 @@ param(
 
     [string] $MiniExcelVersion = '2.0.0-preview.4',
 
+    [string] $MiniExcelSourceRoot,
+
     [switch] $SkipNativeBuild,
 
     [ValidateRange(100, 1000000)]
@@ -20,6 +22,10 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $packageDirectory = Join-Path $repositoryRoot 'artifacts/packages'
 $consumerProject = Join-Path $repositoryRoot 'tests/MiniExcelRust.PackageTests/MiniExcelRust.PackageTests.csproj'
+$baselineProperties = @()
+if ($MiniExcelSourceRoot) {
+    $baselineProperties += "-p:MiniExcelSourceRoot=$([System.IO.Path]::GetFullPath($MiniExcelSourceRoot))"
+}
 
 if (-not $SkipNativeBuild) {
     & (Join-Path $PSScriptRoot 'Build-Native.ps1') -Rid $Rid
@@ -52,7 +58,8 @@ finally {
     --force `
     --source $packageDirectory `
     -p:MiniExcelRustPackageVersion=$Version `
-    -p:MiniExcelVersion=$MiniExcelVersion
+    -p:MiniExcelVersion=$MiniExcelVersion `
+    @baselineProperties
 if ($LASTEXITCODE -ne 0) {
     throw 'Package consumer restore failed.'
 }
@@ -60,6 +67,7 @@ if ($LASTEXITCODE -ne 0) {
 & dotnet run --project $consumerProject -c Release --no-restore `
     -p:MiniExcelRustPackageVersion=$Version `
     -p:MiniExcelVersion=$MiniExcelVersion `
+    @baselineProperties `
     -- suite $LifecycleIterations $MaxPrivateGrowthMb
 if ($LASTEXITCODE -ne 0) {
     throw 'Package consumer smoke test failed.'

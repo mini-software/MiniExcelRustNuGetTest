@@ -28,6 +28,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
 
     <ExpectedNativeAsset Include="$(MiniExcelRustArtifactsRoot)\win-x64\miniexcel_ffi.dll" Rid="win-x64" PackagePath="runtimes/win-x64/native/miniexcel_ffi.dll" />

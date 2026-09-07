@@ -112,4 +112,6 @@ jobs:
             Automated benchmark refresh from `${{ github.workflow }}`.
 
             Source run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          add-paths: docs/benchmarks
+          add-paths: |
+            README.md
+            docs/benchmarks

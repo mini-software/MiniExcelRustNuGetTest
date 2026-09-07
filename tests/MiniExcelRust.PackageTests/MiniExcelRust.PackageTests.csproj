@@ -11,8 +11,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MiniExcel" Version="$(MiniExcelVersion)" />
+    <PackageReference Include="MiniExcel" Version="$(MiniExcelVersion)" Condition="'$(MiniExcelSourceRoot)' == ''" />
     <PackageReference Include="MiniExcelRust" Version="$(MiniExcelRustPackageVersion)" />
+    <ProjectReference Include="$(MiniExcelSourceRoot)\src\MiniExcel\MiniExcel.csproj" Condition="'$(MiniExcelSourceRoot)' != ''" />
   </ItemGroup>
 
 </Project>

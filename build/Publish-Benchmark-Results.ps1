@@ -60,6 +60,7 @@ $published = foreach ($resultFile in $resultFiles) {
 }
 
 $latestTimestamp = ($published.TimestampUtc | Sort-Object -Descending | Select-Object -First 1)
+$sortedPublished = @($published | Sort-Object Rid, Scenario)
 $index = [Collections.Generic.List[string]]::new()
 $index.Add('# Cross-platform benchmark results')
 $index.Add('')
@@ -69,11 +70,38 @@ $index.Add('Each platform validates every returned row and cell before timing eq
 $index.Add('')
 $index.Add('| RID | Scenario | .NET runtime | MiniExcel | MiniExcel (ms) | MiniExcelRust (ms) | Speedup | Allocation reduction | Working-set reduction |')
 $index.Add('| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |')
-foreach ($row in $published | Sort-Object Rid, Scenario) {
+foreach ($row in $sortedPublished) {
     $index.Add("| [$($row.Rid)](benchmark-$($row.Rid).md) | $($row.Scenario) | $($row.DotNetRuntime) | $($row.MiniExcelVersion) | $($row.BaselineElapsedMs) | $($row.CandidateElapsedMs) | $($row.Speedup)x | $($row.AllocationReductionPercent)% | $($row.WorkingSetReductionPercent)% |")
 }
 $index.Add('')
 $index.Add('Managed allocation excludes allocations made inside Rust. Each linked report includes peak process memory and environment metadata; the adjacent JSON contains every raw iteration and input hash.')
 $index | Set-Content (Join-Path $OutputDirectory 'README.md')
+
+$summary = [Collections.Generic.List[string]]::new()
+$summary.Add("_Last updated (UTC): $($latestTimestamp.ToString('yyyy-MM-dd HH:mm:ss'))_")
+$summary.Add('')
+$summary.Add('| RID | Scenario | MiniExcel (ms) | MiniExcelRust (ms) | Speedup | Allocation reduction | Working-set reduction |')
+$summary.Add('| --- | --- | ---: | ---: | ---: | ---: | ---: |')
+foreach ($row in $sortedPublished) {
+    $summary.Add("| $($row.Rid) | $($row.Scenario) | $($row.BaselineElapsedMs) | $($row.CandidateElapsedMs) | $($row.Speedup)x | $($row.AllocationReductionPercent)% | $($row.WorkingSetReductionPercent)% |")
+}
+$summary.Add('')
+$summary.Add('[Full reports and raw results](https://github.com/mini-software/MiniExcelRustNuGetTest/blob/main/docs/benchmarks/README.md)')
+
+$readmePath = Join-Path $repositoryRoot 'README.md'
+$readme = Get-Content $readmePath -Raw
+$startMarker = '<!-- benchmark-summary:start -->'
+$endMarker = '<!-- benchmark-summary:end -->'
+$startIndex = $readme.IndexOf($startMarker, [StringComparison]::Ordinal)
+$endIndex = $readme.IndexOf($endMarker, [StringComparison]::Ordinal)
+if ($startIndex -lt 0 -or $endIndex -le $startIndex) {
+    throw "README benchmark summary markers are missing or out of order: $readmePath"
+}
+
+$endIndex += $endMarker.Length
+$newLine = if ($readme.Contains("`r`n")) { "`r`n" } else { "`n" }
+$summaryBlock = $startMarker + $newLine + ($summary -join $newLine) + $newLine + $endMarker
+$updatedReadme = $readme.Substring(0, $startIndex) + $summaryBlock + $readme.Substring($endIndex)
+[IO.File]::WriteAllText($readmePath, $updatedReadme)
 
 Write-Host "Published $($resultFiles.Count) platform result set(s) to $OutputDirectory."
